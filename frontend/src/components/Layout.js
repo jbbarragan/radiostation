@@ -85,7 +85,7 @@ function BroadcastModal({ onClose }) {
         if (e.data && e.data.size > 0) {
           try {
             await fetch(
-              `${process.env.REACT_APP_API_URL || 'http://localhost:8001'}/api/radio/broadcast-chunk/`,
+              `http://localhost:8001/api/radio/broadcast-chunk/`,
               {
                 method: 'POST',
                 headers: {
