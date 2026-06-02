@@ -15,4 +15,7 @@ urlpatterns = [
     path('auth/me/', views.me_view, name='me'),
     path('settings/', views.settings_view, name='settings'),
     path('analytics/', views.analytics_view, name='analytics'),
+    path('radio/status/', views.radio_status_view, name='radio_status'),
+    path('radio/broadcast-token/', views.broadcast_token_view, name='broadcast_token'),
+    path('radio/broadcast-chunk/', views.broadcast_chunk_view, name='broadcast_chunk'),
 ]

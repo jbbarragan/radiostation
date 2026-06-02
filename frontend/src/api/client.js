@@ -81,3 +81,11 @@ export const saveSettings = (data) => api.post('/settings/', data);
 
 // ─── Analytics ───────────────────────────────────────────────────────────────
 export const getAnalytics = () => api.get('/analytics/');
+
+
+// ─── Radio Status ────────────────────────────────────────────────
+// state: "show" | "backup" | "off"
+export const getRadioStatus = () => api.get('/radio/status/');
+
+// ─── Broadcast (transmisión en vivo desde el estudio) ─────────────
+export const getBroadcastToken = () => api.get('/radio/broadcast-token/');

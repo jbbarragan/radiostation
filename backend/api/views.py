@@ -11,6 +11,10 @@ from datetime import datetime, timedelta
 import mutagen
 import os
 
+RADIO_STATE_FILE = "/tmp/radio_state"
+ICECAST_HARBOR_PASSWORD = "LiveSource2024!"
+ICECAST_SOURCE_PASSWORD = "oL3ydtHXmWg2OVbsmuMhX6zjyCkzTp4J"
+
 from .models import Track, Playlist, PlaylistTrack, Show, ShowItem, Settings, SHOW_COLORS
 from .serializers import (
     TrackSerializer, PlaylistSerializer, PlaylistTrackSerializer,
@@ -296,6 +300,45 @@ def settings_view(request):
 
 
 @api_view(['GET'])
+@permission_classes([AllowAny])
+def radio_status_view(request):
+    """
+    Devuelve el estado del radio:
+      state: "show" | "backup" | "off"
+      show:  datos del show activo (null si no hay)
+    """
+    try:
+        with open(RADIO_STATE_FILE, "r") as f:
+            state = f.read().strip()
+    except Exception:
+        state = "off"
+
+    show_data = None
+    if state in ("show",):
+        now = timezone.now()
+        show = Show.objects.filter(is_live=True).first()
+        if not show:
+            show = Show.objects.filter(start_time__lte=now, end_time__gte=now).first()
+        if show:
+            show_data = ShowSerializer(show).data
+
+    return Response({"state": state, "show": show_data})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def broadcast_token_view(request):
+    """Credenciales para transmisión en vivo desde el estudio."""
+    return Response({
+        "harbor_host": request.get_host().split(":")[0],
+        "harbor_port": 8005,
+        "harbor_password": ICECAST_HARBOR_PASSWORD,
+        "mount": "/live",
+        "bitrate": 128,
+    })
+
+
+@api_view(['GET'])
 def analytics_view(request):
     now = timezone.now()
     week_ago = now - timedelta(days=7)
@@ -337,3 +380,36 @@ def analytics_view(request):
         'shows_by_day': shows_by_day,
         'top_tracks': list(top_tracks),
     })
+
+
+# ── Broadcast chunk relay ─────────────────────────────────────────
+from django.views.decorators.csrf import csrf_exempt
+from django.http import HttpResponse
+from .broadcast_relay import _get_harbor_conn, close_harbor
+
+@csrf_exempt
+@api_view(['POST', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def broadcast_chunk_view(request):
+    """
+    POST: recibe un chunk de audio binario del browser y lo reenvía al harbor.
+    DELETE: cierra la conexión al harbor (fin de transmisión).
+    """
+    if request.method == 'DELETE':
+        close_harbor()
+        return Response({"status": "closed"})
+
+    data = request.body
+    if not data:
+        return Response({"status": "empty"}, status=400)
+
+    conn = _get_harbor_conn()
+    if conn is None:
+        return Response({"error": "No se pudo conectar al harbor"}, status=503)
+
+    try:
+        conn.send(data)
+        return Response({"status": "ok", "bytes": len(data)})
+    except Exception as e:
+        close_harbor()
+        return Response({"error": str(e)}, status=503)
