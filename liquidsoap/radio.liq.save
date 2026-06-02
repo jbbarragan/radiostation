@@ -43,22 +43,16 @@ radio_active = fallback(
 
 radio = switch(
   id="main_switch",
-  track_sensitive=false,
-  [
+  track_sens
     ({ get_state() != "off" }, radio_active),
     ({ true }, silence_src)
   ]
 )
 
 # USB: solo cuando hay audio real (sin silencio forzado)
-# radio_active ya tiene fallback: live > scheduled > backup > silencio(mksafe)
-# Sin switch - siempre transmite lo que haya
-output.external(
+output.alsa(
   id="usb_out",
-  fallible=true,
-  flush=true,
-  %wav(stereo,channels=2,samplesize=16,samplerate=44100),
-  "/home/radioadmin/radiostation-fixed/liquidsoap/usb_out.sh",
+  device="plughw:1,0",
   radio_active
 )
 
@@ -69,21 +63,4 @@ output.icecast(
   port=8000,
   password="oL3ydtHXmWg2OVbsmuMhX6zjyCkzTp4J",
   mount="/stream",
-  name="XHCDMX Radio",
-  description="RadioStation XHCDMX",
-  url="https://stream.xhcdmx.org",
-  radio
-)
-
-output.icecast(
-  %mp3(bitrate=128),
-  id="icecast_tab",
-  host="localhost",
-  port=8000,
-  password="oL3ydtHXmWg2OVbsmuMhX6zjyCkzTp4J",
-  mount="/icecast",
-  name="XHCDMX Radio",
-  description="RadioStation XHCDMX",
-  url="https://stream.xhcdmx.org",
-  radio
-)
+  nam
