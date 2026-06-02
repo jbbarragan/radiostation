@@ -265,7 +265,14 @@ class ShowViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def go_live(self, request, pk=None):
         show = self.get_object()
-        # Turn off any other live show
+        now = timezone.now()
+        # No permitir activar live en un show ya expirado
+        if not show.is_live and show.end_time < now:
+            return Response(
+                {'error': 'Este show ya terminó y no puede ponerse en vivo.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        # Apagar cualquier otro show live
         Show.objects.exclude(id=show.id).update(is_live=False)
         show.is_live = not show.is_live
         show.save()
@@ -273,8 +280,9 @@ class ShowViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def current_live(self, request):
-        # Return any show marked as live, regardless of scheduled time
-        show = Show.objects.filter(is_live=True).first()
+        # Solo retorna shows live que no hayan expirado
+        now = timezone.now()
+        show = Show.objects.filter(is_live=True, end_time__gte=now).first()
         if show:
             return Response(ShowSerializer(show).data)
         return Response(None)
@@ -316,7 +324,8 @@ def radio_status_view(request):
     show_data = None
     if state in ("show",):
         now = timezone.now()
-        show = Show.objects.filter(is_live=True).first()
+        # Solo considera is_live si el show no ha expirado
+        show = Show.objects.filter(is_live=True, end_time__gte=now).first()
         if not show:
             show = Show.objects.filter(start_time__lte=now, end_time__gte=now).first()
         if show:

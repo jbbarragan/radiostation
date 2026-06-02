@@ -17,7 +17,7 @@ from datetime import datetime, timezone as tz
 from pathlib import Path
 
 # ── Configurar Django ──────────────────────────────────────────────
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "radiostation.settings")
 django.setup()
@@ -56,11 +56,23 @@ def has_backup_files() -> bool:
         return False
     return any(bd.glob("*.mp3")) or any(bd.glob("*.ogg")) or any(bd.glob("*.flac"))
 
+def expire_stale_live_shows():
+    """Apaga is_live en shows cuyo end_time ya pasó."""
+    now = datetime.now(tz.utc)
+    stale = Show.objects.filter(is_live=True, end_time__lt=now)
+    count = stale.count()
+    if count:
+        stale.update(is_live=False)
+        log.info(f"Auto-apagado is_live en {count} show(s) expirado(s)")
+
+
 def get_active_show():
     """Devuelve el show activo ahora mismo (por tiempo o marcado is_live)."""
     now = datetime.now(tz.utc)
-    # Primero busca show marcado manualmente como live
-    show = Show.objects.filter(is_live=True).first()
+    # Primero expira shows viejos marcados como live
+    expire_stale_live_shows()
+    # Busca show marcado manualmente como live Y dentro de su horario
+    show = Show.objects.filter(is_live=True, end_time__gte=now).first()
     if show:
         return show, "live"
     # Luego busca show programado por tiempo

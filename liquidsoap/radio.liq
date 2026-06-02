@@ -53,14 +53,6 @@ radio = switch(
 # USB: solo cuando hay audio real (sin silencio forzado)
 # radio_active ya tiene fallback: live > scheduled > backup > silencio(mksafe)
 # Sin switch - siempre transmite lo que haya
-output.external(
-  id="usb_out",
-  fallible=true,
-  flush=true,
-  %wav(stereo,channels=2,samplesize=16,samplerate=44100),
-  "/home/radioadmin/radiostation-fixed/liquidsoap/usb_out.sh",
-  radio_active
-)
 
 output.icecast(
   %mp3(bitrate=128),
