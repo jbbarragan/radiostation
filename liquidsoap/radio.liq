@@ -1,12 +1,15 @@
 #!/usr/bin/liquidsoap
 # XHCDMX Radio – radio.liq
-
 set("log.level", 3)
 set("log.file", true)
 set("log.file.path", "/home/radioadmin/radiostation-fixed/logs/liquidsoap.log")
 
-# ─── Fuentes ───────────────────────────────────────────────────────────────────
+# Telnet para control remoto (skip, reload, etc.)
+set("server.telnet", true)
+set("server.telnet.bind_addr", "127.0.0.1")
+set("server.telnet.port", 1234)
 
+# ─── Fuentes ───────────────────────────────────────────────────────────────────
 backup = mksafe(playlist(
   id="backup",
   mode="random",
@@ -17,29 +20,19 @@ backup = mksafe(playlist(
 scheduled = mksafe(playlist(
   id="scheduled",
   mode="normal",
-  reload=5,
+  reload=3600,
+  reload_mode="watch",
   "/tmp/radio_playlist.m3u"
 ))
 
 # ─── Lógica de prioridad: show programado > backup ────────────────────────────
-
 radio = fallback(
   id="main_fallback",
   track_sensitive=false,
   [scheduled, backup]
 )
 
-# ─── Salida USB (dispositivo plughw:1,0) ──────────────────────────────────────
-# Siempre desde radio_active para escuchar tanto show como backup
-
-output.alsa(
-  id="usb_out",
-  device="plughw:1,0",
-  radio
-)
-
 # ─── Salida Icecast ────────────────────────────────────────────────────────────
-
 output.icecast(
   %mp3(bitrate=128),
   id="icecast_stream",
