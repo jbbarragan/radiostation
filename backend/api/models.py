@@ -3,6 +3,18 @@ from django.contrib.auth.models import User
 import uuid
 
 
+class TrackFolder(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+
 class Track(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     title = models.CharField(max_length=255)
@@ -13,6 +25,10 @@ class Track(models.Model):
     file = models.FileField(upload_to='tracks/')
     uploaded_at = models.DateTimeField(auto_now_add=True)
     uploaded_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    folder = models.ForeignKey(
+        TrackFolder, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='tracks'
+    )
 
     class Meta:
         ordering = ['title']

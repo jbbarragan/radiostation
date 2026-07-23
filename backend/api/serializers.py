@@ -1,12 +1,28 @@
 from rest_framework import serializers
 from django.contrib.auth.models import User
-from .models import Track, Playlist, PlaylistTrack, Show, ShowItem, Settings
+from .models import Track, TrackFolder, Playlist, PlaylistTrack, Show, ShowItem, Settings
+
+
+class TrackFolderSerializer(serializers.ModelSerializer):
+    track_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TrackFolder
+        fields = ['id', 'name', 'created_at', 'track_count']
+        read_only_fields = ['id', 'created_at']
+
+    def get_track_count(self, obj):
+        return obj.tracks.count()
 
 
 class TrackSerializer(serializers.ModelSerializer):
+    folder_id = serializers.UUIDField(source='folder.id', read_only=True, allow_null=True)
+    folder_name = serializers.CharField(source='folder.name', read_only=True, allow_null=True)
+
     class Meta:
         model = Track
-        fields = ['id', 'title', 'artist', 'album', 'genre', 'duration', 'file', 'uploaded_at']
+        fields = ['id', 'title', 'artist', 'album', 'genre', 'duration', 'file',
+                  'uploaded_at', 'folder_id', 'folder_name']
         read_only_fields = ['id', 'uploaded_at', 'duration']
 
 

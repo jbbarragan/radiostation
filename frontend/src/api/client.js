@@ -53,6 +53,18 @@ export const getTracks = (params) => api.get('/tracks/', { params });
 export const uploadTrack = (formData) =>
   api.post('/tracks/', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
 export const deleteTrack = (id) => api.delete(`/tracks/${id}/`);
+export const moveTrack = (id, folder_id) =>
+  api.patch(`/tracks/${id}/move/`, { folder_id });
+
+// Batch upload: sube múltiples archivos en una sola petición
+export const batchUploadTracks = (formData) =>
+  api.post('/tracks/batch_upload/', formData);
+
+// ─── Track Folders ───────────────────────────────────────────────────────────
+export const getFolders = () => api.get('/track-folders/');
+export const createFolder = (name) => api.post('/track-folders/', { name });
+export const deleteFolder = (id) => api.delete(`/track-folders/${id}/`);
+export const renameFolder = (id, name) => api.patch(`/track-folders/${id}/`, { name });
 
 // ─── Playlists ───────────────────────────────────────────────────────────────
 export const getPlaylists = () => api.get('/playlists/');
@@ -82,9 +94,7 @@ export const saveSettings = (data) => api.post('/settings/', data);
 // ─── Analytics ───────────────────────────────────────────────────────────────
 export const getAnalytics = () => api.get('/analytics/');
 
-
 // ─── Radio Status ────────────────────────────────────────────────
-// state: "show" | "backup" | "off"
 export const getRadioStatus = () => api.get('/radio/status/');
 
 // ─── Broadcast (transmisión en vivo desde el estudio) ─────────────

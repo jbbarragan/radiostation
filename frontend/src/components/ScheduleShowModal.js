@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { createShow, getTracks, getPlaylists, addItemToShow, removeItemFromShow } from '../api/client';
+import { createShow, getTracks, getPlaylists, addItemToShow, removeItemFromShow, getFolders } from '../api/client';
 import { format } from 'date-fns';
 
 const DAYS = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
@@ -55,7 +55,6 @@ function StepBasic({ onCreated, onClose, defaultStart }) {
         repeat_days: repeatDays,
         repeat_until: repeatUntil || null,
       });
-      // res.data es el show recién creado con su id
       onCreated(res.data);
     } catch (err) {
       setError(err.response?.data?.non_field_errors?.[0] || 'Error al crear el show');
@@ -99,14 +98,14 @@ function StepBasic({ onCreated, onClose, defaultStart }) {
           </label>
         </div>
         {!startNow && (
-          <input type="datetime-local" value={startDate}
-            onChange={(e) => setStartDate(e.target.value)} style={{ marginTop: 8 }} />
+          <input type="datetime-local" value={startDate} onChange={(e) => setStartDate(e.target.value)}
+            style={{ marginTop: 6 }} />
         )}
       </div>
 
       <div className="form-group">
         <label>Duración (minutos)</label>
-        <input type="number" min="1" max="1440" value={duration}
+        <input type="number" min="5" max="480" value={duration}
           onChange={(e) => setDuration(Number(e.target.value))} />
       </div>
 
@@ -114,21 +113,24 @@ function StepBasic({ onCreated, onClose, defaultStart }) {
         <label>Repetición</label>
         <select value={repeat} onChange={(e) => setRepeat(e.target.value)}>
           <option value="none">Sin repetición</option>
-          <option value="daily">Cada día</option>
-          <option value="weekly">Semanal</option>
-          <option value="monthly">Mensual</option>
-          <option value="custom_days">Días específicos de la semana</option>
+          <option value="daily">Todos los días</option>
+          <option value="weekly">Semanalmente</option>
+          <option value="monthly">Mensualmente</option>
+          <option value="custom_days">Días específicos</option>
         </select>
       </div>
 
       {repeat === 'custom_days' && (
         <div className="form-group">
           <label>Días de la semana</label>
-          <div style={s.daysRow}>
+          <div style={{ display: 'flex', gap: 6 }}>
             {DAYS.map((d, i) => (
-              <button key={d} type="button"
-                style={{ ...s.dayBtn, ...(repeatDays.includes(i) ? s.dayBtnActive : {}) }}
-                onClick={() => toggleDay(i)}>{d}</button>
+              <button key={i} type="button" style={{
+                padding: '4px 8px', borderRadius: 6, fontSize: 12, cursor: 'pointer',
+                background: repeatDays.includes(i) ? 'var(--accent)' : 'var(--bg-primary)',
+                color: repeatDays.includes(i) ? 'white' : 'var(--text-secondary)',
+                border: '1px solid var(--border)',
+              }} onClick={() => toggleDay(i)}>{d}</button>
             ))}
           </div>
         </div>
@@ -153,23 +155,41 @@ function StepBasic({ onCreated, onClose, defaultStart }) {
 
 // ─── Paso 2: Contenido del show ──────────────────────────────────────────────
 function StepContent({ show, onDone }) {
-  const [tab, setTab]     = useState('tracks');
-  const [search, setSearch] = useState('');
-  const [adding, setAdding] = useState(null);
-  // show_items local (se actualiza sin recargar todo)
-  const [items, setItems] = useState(show.show_items || []);
+  const [tab, setTab]           = useState('tracks');
+  const [search, setSearch]     = useState('');
+  const [adding, setAdding]     = useState(null);
+  const [items, setItems]       = useState(show.show_items || []);
+  // Navegación por carpetas en el picker de tracks
+  const [trackView, setTrackView]         = useState('all'); // 'all' | 'folders'
+  const [selectedFolder, setSelectedFolder] = useState(null); // { id, name } | null
+
+  // Params de tracks según vista
+  const trackParams = (() => {
+    if (search) return { search };
+    if (trackView === 'folders') {
+      if (selectedFolder) return { folder_id: selectedFolder.id };
+      return { no_folder: '1' };
+    }
+    return {};
+  })();
 
   const { data: tracksData } = useQuery({
-    queryKey: ['tracks', search],
-    queryFn: () => getTracks({ search }),
+    queryKey: ['tracks', trackParams],
+    queryFn: () => getTracks(trackParams),
   });
   const { data: playlistsData } = useQuery({
     queryKey: ['playlists'],
     queryFn: getPlaylists,
   });
+  const { data: foldersData } = useQuery({
+    queryKey: ['folders'],
+    queryFn: getFolders,
+    enabled: tab === 'tracks',
+  });
 
   const tracks    = tracksData?.data?.results || tracksData?.data || [];
   const playlists = playlistsData?.data?.results || playlistsData?.data || [];
+  const folders   = foldersData?.data?.results || foldersData?.data || [];
 
   const totalDur  = show.duration_seconds || ((new Date(show.end_time) - new Date(show.start_time)) / 1000);
   const usedDur   = items.reduce((acc, item) => acc + (item.track?.duration || 0), 0);
@@ -193,7 +213,6 @@ function StepContent({ show, onDone }) {
     setAdding(pl.id);
     try {
       const res = await addItemToShow(show.id, { playlist_id: pl.id });
-      // El backend puede devolver un array de items o un solo item
       const newItems = Array.isArray(res.data) ? res.data : [res.data];
       setItems((prev) => [...prev, ...newItems]);
     } catch (err) {
@@ -212,7 +231,7 @@ function StepContent({ show, onDone }) {
 
   return (
     <div>
-      {/* Encabezado del show recién creado */}
+      {/* Encabezado del show */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14,
         paddingBottom: 12, borderBottom: '1px solid var(--border)' }}>
         <div style={{ width: 12, height: 12, borderRadius: 3, background: show.color, flexShrink: 0 }} />
@@ -268,7 +287,7 @@ function StepContent({ show, onDone }) {
         </div>
       )}
 
-      {/* Tabs agregar contenido */}
+      {/* Tabs */}
       <div style={{ marginBottom: 12 }}>
         <div style={s.sectionLabel}>Agregar contenido</div>
         <div style={{ display: 'flex', gap: 0, marginBottom: 10,
@@ -287,18 +306,84 @@ function StepContent({ show, onDone }) {
 
         {tab === 'tracks' && (
           <>
-            <input placeholder="Buscar pistas…" value={search}
-              onChange={(e) => setSearch(e.target.value)} style={{ width: '100%', marginBottom: 8 }} />
+            {/* Controles de vista */}
+            <div style={{ display: 'flex', gap: 6, marginBottom: 8, alignItems: 'center' }}>
+              <input
+                placeholder="Buscar pistas…"
+                value={search}
+                onChange={(e) => { setSearch(e.target.value); setTrackView('all'); setSelectedFolder(null); }}
+                style={{ flex: 1 }}
+              />
+              {!search && (
+                <div style={{ display: 'flex', border: '1px solid var(--border)', borderRadius: 5, overflow: 'hidden', flexShrink: 0 }}>
+                  <button
+                    style={{ ...s.viewToggle, background: trackView === 'all' ? 'var(--bg-active)' : 'var(--bg-panel)' }}
+                    onClick={() => { setTrackView('all'); setSelectedFolder(null); }}
+                    title="Ver todos"
+                  >≡ Todos</button>
+                  <button
+                    style={{ ...s.viewToggle, background: trackView === 'folders' ? 'var(--bg-active)' : 'var(--bg-panel)', borderLeft: '1px solid var(--border)' }}
+                    onClick={() => { setTrackView('folders'); setSelectedFolder(null); }}
+                    title="Ver por carpetas"
+                  >📁 Carpetas</button>
+                </div>
+              )}
+            </div>
+
+            {/* Navegación de carpetas */}
+            {trackView === 'folders' && !search && (
+              <div style={{ marginBottom: 6 }}>
+                {selectedFolder ? (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--text-secondary)' }}>
+                    <button
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--accent)', fontSize: 11, padding: 0 }}
+                      onClick={() => setSelectedFolder(null)}
+                    >← Carpetas</button>
+                    <span>/</span>
+                    <span style={{ fontWeight: 600 }}>📁 {selectedFolder.name}</span>
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                    <button
+                      style={s.folderChip}
+                      onClick={() => setSelectedFolder({ id: '__none__', name: 'Sin carpeta' })}
+                    >
+                      🎵 Sin carpeta
+                    </button>
+                    {folders.map((f) => (
+                      <button key={f.id} style={s.folderChip} onClick={() => setSelectedFolder(f)}>
+                        📁 {f.name} <span style={{ opacity: 0.6, fontSize: 10 }}>({f.track_count})</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Lista de tracks */}
             <div style={{ maxHeight: 200, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 6 }}>
-              {tracks.length === 0
-                ? <div style={{ padding: 20, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>No se encontraron pistas</div>
-                : tracks.map((track, i) => (
+              {/* Si estamos en vista carpetas y no hay carpeta seleccionada, mostrar mensaje */}
+              {trackView === 'folders' && !search && !selectedFolder ? (
+                <div style={{ padding: 20, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
+                  Selecciona una carpeta arriba
+                </div>
+              ) : tracks.length === 0 ? (
+                <div style={{ padding: 20, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
+                  No se encontraron pistas
+                </div>
+              ) : (
+                tracks.map((track, i) => (
                   <div key={track.id} style={{ display: 'flex', alignItems: 'center', padding: '7px 10px',
                     borderBottom: i < tracks.length - 1 ? '1px solid var(--border)' : 'none', gap: 8 }}>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 12, fontWeight: 500, whiteSpace: 'nowrap',
                         overflow: 'hidden', textOverflow: 'ellipsis' }}>{track.title}</div>
-                      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{track.artist || '—'}</div>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                        {track.artist || '—'}
+                        {track.folder_name && trackView === 'all' && !search && (
+                          <span style={{ marginLeft: 6, opacity: 0.6 }}>· 📁 {track.folder_name}</span>
+                        )}
+                      </div>
                     </div>
                     <span style={{ fontSize: 11, color: 'var(--text-secondary)',
                       fontFamily: 'var(--font-mono)', flexShrink: 0 }}>{fmtDur(track.duration)}</span>
@@ -309,7 +394,7 @@ function StepContent({ show, onDone }) {
                     </button>
                   </div>
                 ))
-              }
+              )}
             </div>
           </>
         )}
@@ -321,7 +406,7 @@ function StepContent({ show, onDone }) {
               : playlists.map((pl, i) => (
                 <div key={pl.id} style={{ display: 'flex', alignItems: 'center', padding: '8px 10px',
                   borderBottom: i < playlists.length - 1 ? '1px solid var(--border)' : 'none', gap: 8 }}>
-                  <div style={{ flex: 1 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 12, fontWeight: 500 }}>{pl.name}</div>
                     <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                       {pl.track_count} pistas · {fmtDur(pl.total_duration)}
@@ -329,8 +414,8 @@ function StepContent({ show, onDone }) {
                   </div>
                   <button className="btn btn-primary btn-sm"
                     onClick={() => handleAddPlaylist(pl)}
-                    disabled={adding === pl.id || fillPct >= 100}>
-                    {adding === pl.id ? '…' : '+ Agregar todo'}
+                    disabled={adding === pl.id}>
+                    {adding === pl.id ? '…' : '+ Todo'}
                   </button>
                 </div>
               ))
@@ -340,91 +425,97 @@ function StepContent({ show, onDone }) {
       </div>
 
       <div className="modal-footer">
-        <button className="btn btn-secondary" onClick={onDone}>
-          Omitir y cerrar
-        </button>
-        <button className="btn btn-primary" onClick={onDone}>
-          ✓ Listo
-        </button>
+        <button className="btn btn-primary" onClick={onDone}>Listo ✓</button>
       </div>
     </div>
   );
 }
 
 // ─── Modal principal ─────────────────────────────────────────────────────────
-export default function ScheduleShowModal({ onClose, onSaved, defaultStart }) {
-  const [step, setStep] = useState(1);   // 1 = básico, 2 = contenido
-  const [createdShow, setCreatedShow] = useState(null);
+export default function ScheduleShowModal({ onClose, defaultStart, onCreated: onCreatedExternal }) {
+  const [step, setStep]   = useState(1);
+  const [show, setShow]   = useState(null);
 
-  const handleCreated = (show) => {
-    setCreatedShow(show);
+  const handleCreated = (newShow) => {
+    setShow(newShow);
     setStep(2);
   };
 
   const handleDone = () => {
-    onSaved();
+    if (onCreatedExternal) onCreatedExternal(show);
+    onClose();
   };
 
   return (
-    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal" style={step === 2 ? { maxWidth: 680, width: '95vw' } : {}}>
-        {/* Indicador de paso */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 16 }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>
-            {step === 1 ? 'Programar Show' : 'Agregar Contenido'}
-          </div>
-          <div style={{ flex: 1 }} />
-          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Paso {step} de 2</span>
-          <div style={{ display: 'flex', gap: 4 }}>
-            {[1, 2].map((n) => (
-              <div key={n} style={{
-                width: 20, height: 4, borderRadius: 2,
-                background: n <= step ? 'var(--accent)' : 'var(--border)',
-              }} />
-            ))}
-          </div>
+    <div style={s.overlay} onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div style={s.modal}>
+        {/* Pasos */}
+        <div style={s.stepBar}>
+          {[1, 2].map((n) => (
+            <div key={n} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <div style={{
+                width: 22, height: 22, borderRadius: '50%', display: 'flex', alignItems: 'center',
+                justifyContent: 'center', fontSize: 11, fontWeight: 700,
+                background: step >= n ? 'var(--accent)' : 'var(--bg-primary)',
+                color: step >= n ? 'white' : 'var(--text-muted)',
+              }}>{n}</div>
+              <span style={{ fontSize: 12, color: step >= n ? 'var(--text-primary)' : 'var(--text-muted)', fontWeight: step === n ? 600 : 400 }}>
+                {n === 1 ? 'Configurar show' : 'Agregar contenido'}
+              </span>
+              {n < 2 && <span style={{ color: 'var(--text-muted)', marginLeft: 4 }}>→</span>}
+            </div>
+          ))}
         </div>
 
-        {step === 1 && (
-          <StepBasic
-            defaultStart={defaultStart}
-            onClose={onClose}
-            onCreated={handleCreated}
-          />
-        )}
-
-        {step === 2 && createdShow && (
-          <StepContent
-            show={createdShow}
-            onDone={handleDone}
-          />
-        )}
+        <div style={s.body}>
+          {step === 1 && <StepBasic onCreated={handleCreated} onClose={onClose} defaultStart={defaultStart} />}
+          {step === 2 && show && <StepContent show={show} onDone={handleDone} />}
+        </div>
       </div>
     </div>
   );
 }
 
-// ─── Estilos ─────────────────────────────────────────────────────────────────
 const s = {
-  error: {
-    background: 'var(--red-dim)', color: 'var(--red)',
-    border: '1px solid var(--red-dim)', borderRadius: 4,
-    padding: '8px 12px', marginBottom: 14, fontSize: 12,
+  overlay: {
+    position: 'fixed', inset: 0,
+    background: 'rgba(0,0,0,0.5)',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    zIndex: 1000, padding: 16,
+  },
+  modal: {
+    background: 'var(--bg-secondary)',
+    borderRadius: 12,
+    width: '100%', maxWidth: 560,
+    maxHeight: '90vh',
+    display: 'flex', flexDirection: 'column',
+    boxShadow: '0 20px 60px rgba(0,0,0,0.4)',
+    overflow: 'hidden',
+  },
+  stepBar: {
+    display: 'flex', alignItems: 'center', gap: 16,
+    padding: '14px 20px',
+    borderBottom: '1px solid var(--border)',
+    flexShrink: 0,
+  },
+  body: { overflowY: 'auto', padding: 20, flex: 1 },
+  sectionLabel: {
+    fontSize: 10, fontWeight: 700, color: 'var(--text-muted)',
+    textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6,
   },
   colorGrid: { display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 },
-  colorSwatch: { width: 24, height: 24, borderRadius: 4, cursor: 'pointer' },
-  daysRow: { display: 'flex', gap: 4 },
-  dayBtn: {
-    padding: '4px 8px', borderRadius: 4, background: 'var(--bg-primary)',
-    color: 'var(--text-secondary)', border: '1px solid var(--border-bright)',
-    fontSize: 11, cursor: 'pointer',
+  colorSwatch: { width: 22, height: 22, borderRadius: 5, cursor: 'pointer' },
+  error: {
+    background: 'var(--red-dim)', color: 'var(--red)',
+    borderRadius: 6, padding: '8px 12px', fontSize: 12, marginBottom: 12,
   },
-  dayBtnActive: {
-    background: 'var(--accent-dim)', color: 'var(--accent)',
-    borderColor: 'var(--accent)',
+  viewToggle: {
+    fontSize: 11, padding: '4px 8px', border: 'none', cursor: 'pointer',
+    color: 'var(--text-secondary)',
   },
-  sectionLabel: {
-    fontSize: 11, fontWeight: 600, color: 'var(--text-muted)',
-    textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8,
+  folderChip: {
+    fontSize: 11, padding: '3px 9px', borderRadius: 12,
+    background: 'var(--bg-primary)', border: '1px solid var(--border)',
+    color: 'var(--text-secondary)', cursor: 'pointer',
   },
 };

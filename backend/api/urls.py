@@ -5,6 +5,7 @@ from . import views
 
 router = DefaultRouter()
 router.register(r'tracks', views.TrackViewSet)
+router.register(r'track-folders', views.TrackFolderViewSet)
 router.register(r'playlists', views.PlaylistViewSet)
 router.register(r'shows', views.ShowViewSet)
 
