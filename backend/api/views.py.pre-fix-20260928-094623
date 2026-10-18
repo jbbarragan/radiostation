@@ -1,0 +1,551 @@
+from rest_framework import viewsets, status, generics
+from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework_simplejwt.tokens import RefreshToken
+from django.contrib.auth import authenticate
+from django.contrib.auth.models import User
+from django.utils import timezone
+from django.db.models import Q
+from django.db import transaction
+from rest_framework.exceptions import ValidationError
+from django.shortcuts import get_object_or_404
+from django.utils.dateparse import parse_datetime
+from .scheduling import active_show, ensure_occurrences, sync_content
+from datetime import datetime, timedelta
+import mutagen
+import mutagen.wave
+import os
+import wave
+
+RADIO_STATE_FILE = "/tmp/radio_state"
+ICECAST_HARBOR_PASSWORD = "LiveSource2024!"
+ICECAST_SOURCE_PASSWORD = "oL3ydtHXmWg2OVbsmuMhX6zjyCkzTp4J"
+
+from .models import Track, TrackFolder, Playlist, PlaylistTrack, Show, ShowItem, Settings, SHOW_COLORS
+from .serializers import (
+    TrackSerializer, TrackFolderSerializer, PlaylistSerializer, PlaylistTrackSerializer,
+    ShowSerializer, ShowItemSerializer, SettingsSerializer, UserSerializer
+)
+
+
+def _get_audio_duration(file_obj):
+    """
+    Obtiene la duración de un archivo de audio.
+    Maneja correctamente WAV, MP3, OGG, FLAC, etc.
+    Retorna duración en segundos (float) o 0 si falla.
+    """
+    duration = 0
+    filename = getattr(file_obj, 'name', '')
+    ext = os.path.splitext(filename)[1].lower() if filename else ''
+
+    # Estrategia 1: Para WAV intentar con el módulo 'wave' de stdlib primero
+    # (mutagen a veces no lee correctamente WAVs con chunks no estándar)
+    if ext == '.wav':
+        try:
+            file_obj.seek(0)
+            import io
+            raw = file_obj.read()
+            file_obj.seek(0)
+            with wave.open(io.BytesIO(raw)) as wf:
+                frames = wf.getnframes()
+                rate = wf.getframerate()
+                if rate > 0:
+                    duration = frames / float(rate)
+                    if duration > 0:
+                        return duration
+        except Exception:
+            pass
+
+    # Estrategia 2: mutagen genérico
+    try:
+        file_obj.seek(0)
+        audio = mutagen.File(file_obj)
+        if audio and hasattr(audio, 'info') and audio.info.length > 0:
+            duration = audio.info.length
+            file_obj.seek(0)
+            return duration
+    except Exception:
+        pass
+
+    # Estrategia 3: mutagen.wave explícito
+    if ext == '.wav':
+        try:
+            file_obj.seek(0)
+            audio = mutagen.wave.WAVE(file_obj)
+            if audio and hasattr(audio, 'info') and audio.info.length > 0:
+                duration = audio.info.length
+                file_obj.seek(0)
+                return duration
+        except Exception:
+            pass
+
+    file_obj.seek(0)
+    return duration
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def login_view(request):
+    username = request.data.get('username')
+    password = request.data.get('password')
+    user = authenticate(username=username, password=password)
+    if user:
+        refresh = RefreshToken.for_user(user)
+        return Response({
+            'access': str(refresh.access_token),
+            'refresh': str(refresh),
+            'user': UserSerializer(user).data
+        })
+    return Response({'error': 'Invalid credentials'}, status=status.HTTP_401_UNAUTHORIZED)
+
+
+@api_view(['GET'])
+def me_view(request):
+    return Response(UserSerializer(request.user).data)
+
+
+class TrackFolderViewSet(viewsets.ModelViewSet):
+    queryset = TrackFolder.objects.all()
+    serializer_class = TrackFolderSerializer
+    permission_classes = [IsAuthenticated]
+
+
+class TrackViewSet(viewsets.ModelViewSet):
+    queryset = Track.objects.all()
+    serializer_class = TrackSerializer
+    permission_classes = [IsAuthenticated]
+
+    def perform_create(self, serializer):
+        file = self.request.FILES.get('file')
+        duration = 0
+        if file:
+            duration = _get_audio_duration(file)
+        folder_id = self.request.data.get('folder_id') or None
+        folder = None
+        if folder_id:
+            try:
+                folder = TrackFolder.objects.get(id=folder_id)
+            except TrackFolder.DoesNotExist:
+                pass
+        serializer.save(uploaded_by=self.request.user, duration=duration, folder=folder)
+
+    def get_queryset(self):
+        qs = Track.objects.select_related('folder').all()
+        search = self.request.query_params.get('search')
+        folder_id = self.request.query_params.get('folder_id')
+        no_folder = self.request.query_params.get('no_folder')
+
+        if search:
+            qs = qs.filter(
+                Q(title__icontains=search) |
+                Q(artist__icontains=search) |
+                Q(album__icontains=search)
+            )
+        if folder_id:
+            qs = qs.filter(folder_id=folder_id)
+        elif no_folder == '1':
+            qs = qs.filter(folder__isnull=True)
+        return qs
+
+    @action(detail=True, methods=['patch'])
+    def move(self, request, pk=None):
+        """Mover un track a una carpeta (o a raíz si folder_id=null)"""
+        track = self.get_object()
+        folder_id = request.data.get('folder_id')
+        if folder_id:
+            try:
+                folder = TrackFolder.objects.get(id=folder_id)
+                track.folder = folder
+            except TrackFolder.DoesNotExist:
+                return Response({'error': 'Folder not found'}, status=404)
+        else:
+            track.folder = None
+        track.save()
+        return Response(TrackSerializer(track).data)
+
+    @action(detail=False, methods=['post'])
+    def batch_upload(self, request):
+        """
+        Sube múltiples archivos de audio en una sola petición.
+        Acepta: files[] (multipart), folder_id (opcional)
+        Retorna: { uploaded: [...tracks], errors: [...] }
+        """
+        files = request.FILES.getlist('files')
+        if not files:
+            return Response({'error': 'No files provided'}, status=400)
+
+        folder_id = request.data.get('folder_id') or None
+        folder = None
+        if folder_id:
+            try:
+                folder = TrackFolder.objects.get(id=folder_id)
+            except TrackFolder.DoesNotExist:
+                pass
+
+        uploaded = []
+        errors = []
+
+        for file in files:
+            try:
+                duration = _get_audio_duration(file)
+                nameWithoutExt = os.path.splitext(file.name)[0]
+                parts = nameWithoutExt.split(' - ', 1)
+                if len(parts) >= 2:
+                    artist = parts[0].strip()
+                    title = parts[1].strip()
+                else:
+                    artist = ''
+                    title = nameWithoutExt.strip()
+
+                track = Track.objects.create(
+                    title=title,
+                    artist=artist,
+                    duration=duration,
+                    file=file,
+                    uploaded_by=request.user,
+                    folder=folder,
+                )
+                uploaded.append(TrackSerializer(track).data)
+            except Exception as e:
+                errors.append({'file': file.name, 'error': str(e)})
+
+        return Response({
+            'uploaded': uploaded,
+            'errors': errors,
+            'total': len(files),
+            'success': len(uploaded),
+        }, status=200)
+
+
+class PlaylistViewSet(viewsets.ModelViewSet):
+    queryset = Playlist.objects.prefetch_related('playlist_tracks__track').all()
+    serializer_class = PlaylistSerializer
+    permission_classes = [IsAuthenticated]
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+
+    @action(detail=True, methods=['post'])
+    @transaction.atomic
+    def add_track(self, request, pk=None):
+        playlist = Playlist.objects.select_for_update().get(pk=self.get_object().pk)
+        tracks = requested_tracks(request.data)
+        items = list(playlist.playlist_tracks.order_by('position', 'id'))
+        pos = insertion_position(request.data, len(items))
+        ids = [i.track_id for i in items]
+        ids[pos:pos] = [t.id for t in tracks]
+        # Rebuild only inside the transaction; old entry IDs are preserved.
+        new = [PlaylistTrack(playlist=playlist, track=t, position=len(items)+i) for i,t in enumerate(tracks)]
+        PlaylistTrack.objects.bulk_create(new)
+        items[pos:pos] = new
+        save_order(items)
+        return Response(PlaylistSerializer(playlist).data)
+
+    @action(detail=True, methods=['post'])
+    @transaction.atomic
+    def remove_track(self, request, pk=None):
+        playlist = Playlist.objects.select_for_update().get(pk=self.get_object().pk)
+        get_object_or_404(PlaylistTrack, id=request.data.get('item_id'), playlist=playlist).delete()
+        save_order(list(playlist.playlist_tracks.order_by('position', 'id')))
+        return Response(PlaylistSerializer(playlist).data)
+
+    @action(detail=True, methods=['post'])
+    @transaction.atomic
+    def reorder(self, request, pk=None):
+        playlist = Playlist.objects.select_for_update().get(pk=self.get_object().pk)
+        items = list(playlist.playlist_tracks.order_by('position', 'id'))
+        save_order(validated_order(items, request.data.get('order')))
+        return Response(PlaylistSerializer(playlist).data)
+
+
+def insertion_position(data, length):
+    pos = data.get('position', length)
+    if type(pos) is not int or not 0 <= pos <= length:
+        raise ValidationError({'position': 'Posición inválida; actualiza el contenido.'})
+    return pos
+
+
+def requested_tracks(data):
+    if data.get('playlist_id'):
+        pl = get_object_or_404(Playlist, pk=data['playlist_id'])
+        return [x.track for x in pl.playlist_tracks.select_related('track').order_by('position', 'id')]
+    ids = data.get('track_ids') or ([data['track_id']] if data.get('track_id') else [])
+    if not isinstance(ids, list) or not ids or len(ids) > 2000:
+        raise ValidationError({'track_ids': 'Selecciona entre 1 y 2000 pistas.'})
+    try:
+        return [get_object_or_404(Track, pk=i) for i in ids]
+    except (ValueError, TypeError):
+        raise ValidationError({'track_ids': 'Identificador inválido.'})
+
+
+def validated_order(items, order):
+    if not isinstance(order, list) or any(type(i) is not int for i in order):
+        raise ValidationError({'order': 'Se requiere la lista completa de IDs de contenido.'})
+    by_id = {i.id: i for i in items}
+    if len(order) != len(by_id) or set(order) != set(by_id):
+        raise ValidationError({'order': 'El contenido cambió. Actualiza e intenta de nuevo.'})
+    return [by_id[i] for i in order]
+
+
+def save_order(items):
+    # Two phases avoid unique(playlist, position) collisions even on SQLite.
+    offset = max([x.position for x in items] or [0]) + len(items) + 1
+    for i, item in enumerate(items):
+        type(item).objects.filter(pk=item.pk).update(position=offset+i)
+    for i, item in enumerate(items):
+        type(item).objects.filter(pk=item.pk).update(position=i)
+
+
+def _get_next_color():
+    used = Show.objects.values_list('color', flat=True).distinct()
+    for color in SHOW_COLORS:
+        if color not in used:
+            return color
+    import random
+    return SHOW_COLORS[random.randint(0, len(SHOW_COLORS) - 1)]
+
+
+class ShowViewSet(viewsets.ModelViewSet):
+    queryset = Show.objects.prefetch_related('show_items__track').all()
+    serializer_class = ShowSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        qs = Show.objects.filter(cancelled=False).prefetch_related('show_items__track')
+        start = self.request.query_params.get('start')
+        end = self.request.query_params.get('end')
+        if self.action == 'list':
+            try:
+                first = parse_datetime(start) if start else timezone.now()-timedelta(days=1)
+                last = parse_datetime(end) if end else timezone.now()+timedelta(days=90)
+                if not first or not last or timezone.is_naive(first) or timezone.is_naive(last) or last < first or last-first > timedelta(days=370):
+                    raise ValueError()
+            except (ValueError, TypeError):
+                raise ValidationError('Consulta un rango válido con zona horaria de hasta 370 días.')
+            ensure_occurrences(first, last)
+        if start:
+            qs = qs.filter(end_time__gt=start)
+        if end:
+            qs = qs.filter(start_time__lt=end)
+        return qs.order_by('start_time')
+
+    @transaction.atomic
+    def perform_create(self, serializer):
+        show = serializer.save(created_by=self.request.user, color=self.request.data.get('color') or _get_next_color())
+        show.recurrence_time = show.start_time
+        show.save(update_fields=['recurrence_time'])
+        if show.repeat != 'none':
+            ensure_occurrences(show.start_time, show.start_time+timedelta(days=90))
+
+    @transaction.atomic
+    def update(self, request, *args, **kwargs):
+        original = self.get_object()
+        Show.objects.select_for_update().get(pk=original.parent_show_id or original.id)
+        response = super().update(request, *args, **kwargs)
+        instance = Show.objects.get(pk=original.id)
+        if any(k in request.data for k in ('start_time', 'end_time')):
+            instance.priority_at = timezone.now()
+            instance.save(update_fields=['priority_at'])
+        if not instance.parent_show_id:
+            updates = {k: request.data[k] for k in ('title', 'color') if k in request.data}
+            if updates:
+                instance.occurrences.update(**updates)
+            if any(k in request.data for k in ('repeat', 'repeat_days', 'repeat_until')):
+                instance.occurrences.filter(start_time__gt=timezone.now(), cancelled=False).delete()
+                ensure_occurrences()
+        return Response(ShowSerializer(instance).data)
+
+    @transaction.atomic
+    def destroy(self, request, *args, **kwargs):
+        show = self.get_object()
+        root = Show.objects.select_for_update().get(pk=show.parent_show_id or show.id)
+        scope = request.query_params.get('scope', 'one')
+        if scope == 'series':
+            root.delete()  # Includes template, occurrences, tombstones and their content.
+        elif scope == 'one':
+            show.cancelled = True  # Tombstone prevents regeneration of this slot.
+            show.is_live = False
+            show.save(update_fields=['cancelled', 'is_live'])
+        else:
+            raise ValidationError('scope debe ser one o series.')
+        return Response(status=204)
+
+    def _locked_show(self):
+        obj = self.get_object()
+        Show.objects.select_for_update().get(pk=obj.parent_show_id or obj.id)
+        return Show.objects.get(pk=obj.id)
+
+    def _content_response(self, show):
+        sync_content(show)
+        return Response(ShowSerializer(Show.objects.get(pk=show.id)).data)
+
+    @action(detail=True, methods=['post'])
+    @transaction.atomic
+    def add_item(self, request, pk=None):
+        show = self._locked_show()
+        tracks = requested_tracks(request.data)
+        items = list(show.show_items.order_by('position', 'id'))
+        pos = insertion_position(request.data, len(items))
+        new = [ShowItem(show=show, track=t, position=len(items)+i) for i,t in enumerate(tracks)]
+        ShowItem.objects.bulk_create(new)
+        items[pos:pos] = new
+        save_order(items)
+        return self._content_response(show)
+
+    @action(detail=True, methods=['post'])
+    @transaction.atomic
+    def remove_item(self, request, pk=None):
+        show = self._locked_show()
+        get_object_or_404(ShowItem, id=request.data.get('item_id'), show=show).delete()
+        save_order(list(show.show_items.order_by('position', 'id')))
+        return self._content_response(show)
+
+    @action(detail=True, methods=['post'])
+    @transaction.atomic
+    def reorder(self, request, pk=None):
+        show = self._locked_show()
+        save_order(validated_order(list(show.show_items.order_by('position', 'id')), request.data.get('order')))
+        return self._content_response(show)
+
+    @action(detail=True, methods=['post'])
+    def go_live(self, request, pk=None):
+        show = self.get_object()
+        now = timezone.now()
+        if not show.is_live and show.end_time < now:
+            return Response(
+                {'error': 'Este show ya terminó y no puede ponerse en vivo.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        Show.objects.exclude(id=show.id).update(is_live=False)
+        show.is_live = not show.is_live
+        show.save()
+        return Response(ShowSerializer(show).data)
+
+    @action(detail=False, methods=['get'])
+    def current_live(self, request):
+        now = timezone.now()
+        show = Show.objects.filter(is_live=True, end_time__gte=now).first()
+        if show:
+            return Response(ShowSerializer(show).data)
+        return Response(None)
+
+
+@api_view(['GET', 'POST'])
+def settings_view(request):
+    if request.method == 'GET':
+        settings_dict = {s.key: s.value for s in Settings.objects.all()}
+        defaults = {
+            'slot_minutes': 30,
+            'station_name': 'My Radio Station',
+            'stream_url': '',
+            'timezone': 'UTC',
+        }
+        defaults.update(settings_dict)
+        return Response(defaults)
+    elif request.method == 'POST':
+        for key, value in request.data.items():
+            Settings.set(key, value)
+        return Response({'status': 'saved'})
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def radio_status_view(request):
+    try:
+        with open(RADIO_STATE_FILE, "r") as f:
+            state = f.read().strip()
+    except Exception:
+        state = "off"
+
+    show_data = None
+    if state in ("show",):
+        now = timezone.now()
+        show = active_show(now)
+        if show:
+            show_data = ShowSerializer(show).data
+
+    return Response({"state": state, "show": show_data})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def broadcast_token_view(request):
+    return Response({
+        "harbor_host": request.get_host().split(":")[0],
+        "harbor_port": 8005,
+        "harbor_password": ICECAST_HARBOR_PASSWORD,
+        "mount": "/live",
+        "bitrate": 128,
+    })
+
+
+@api_view(['GET'])
+def analytics_view(request):
+    now = timezone.now()
+    week_ago = now - timedelta(days=7)
+    month_ago = now - timedelta(days=30)
+
+    total_tracks = Track.objects.count()
+    total_playlists = Playlist.objects.count()
+    total_shows = Show.objects.count()
+    shows_this_week = Show.objects.filter(start_time__gte=week_ago).count()
+    shows_this_month = Show.objects.filter(start_time__gte=month_ago).count()
+
+    shows_by_day = []
+    for i in range(7):
+        day = now - timedelta(days=6 - i)
+        day_start = day.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = day.replace(hour=23, minute=59, second=59)
+        count = Show.objects.filter(start_time__range=[day_start, day_end]).count()
+        shows_by_day.append({
+            'date': day_start.strftime('%Y-%m-%d'),
+            'count': count
+        })
+
+    from django.db.models import Count
+    top_tracks = (
+        ShowItem.objects
+        .values('track__title', 'track__artist')
+        .annotate(count=Count('id'))
+        .order_by('-count')[:10]
+    )
+
+    return Response({
+        'total_tracks': total_tracks,
+        'total_playlists': total_playlists,
+        'total_shows': total_shows,
+        'shows_this_week': shows_this_week,
+        'shows_this_month': shows_this_month,
+        'shows_by_day': shows_by_day,
+        'top_tracks': list(top_tracks),
+    })
+
+
+# ── Broadcast chunk relay ─────────────────────────────────────────
+from django.views.decorators.csrf import csrf_exempt
+from django.http import HttpResponse
+from .broadcast_relay import _get_harbor_conn, close_harbor
+
+@csrf_exempt
+@api_view(['POST', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def broadcast_chunk_view(request):
+    if request.method == 'DELETE':
+        close_harbor()
+        return Response({"status": "closed"})
+
+    data = request.body
+    if not data:
+        return Response({"status": "empty"}, status=400)
+
+    conn = _get_harbor_conn()
+    if conn is None:
+        return Response({"error": "No se pudo conectar al harbor"}, status=503)
+
+    try:
+        conn.send(data)
+        return Response({"status": "ok", "bytes": len(data)})
+    except Exception as e:
+        close_harbor()
+        return Response({"error": str(e)}, status=503)

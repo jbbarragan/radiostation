@@ -80,7 +80,7 @@ export const removeTrackFromPlaylist = (id, item_id) =>
 export const getShows = (params) => api.get('/shows/', { params });
 export const createShow = (data) => api.post('/shows/', data);
 export const updateShow = (id, data) => api.patch(`/shows/${id}/`, data);
-export const deleteShow = (id) => api.delete(`/shows/${id}/`);
+export const deleteShow = (id, scope = 'one') => api.delete(`/shows/${id}/`, { params: { scope } });
 export const addItemToShow = (id, data) => api.post(`/shows/${id}/add_item/`, data);
 export const removeItemFromShow = (id, item_id) =>
   api.post(`/shows/${id}/remove_item/`, { item_id });

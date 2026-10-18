@@ -20,8 +20,8 @@ backup = mksafe(playlist(
 scheduled = mksafe(playlist(
   id="scheduled",
   mode="normal",
-  reload=3600,
-  reload_mode="watch",
+  reload=0,
+  reload_mode="never",
   "/tmp/radio_playlist.m3u"
 ))
 
@@ -31,6 +31,33 @@ radio = fallback(
   track_sensitive=false,
   [scheduled, backup]
 )
+
+# Fader only for scheduled transitions; all existing sources/outputs remain.
+# Gain recovers automatically if the scheduler fails mid-transition.
+transition_start = ref(-1000.)
+transition_duration = ref(2.)
+transition_active = ref(false)
+def transition_gain()
+  elapsed = time() - !transition_start
+  if not !transition_active or elapsed > !transition_duration + 8. then
+    1.
+  else
+    gain = 1. - elapsed / !transition_duration
+    if gain > 0. then gain else 0. end
+  end
+end
+radio = amplify(transition_gain, radio)
+server.register(namespace="radio", description="Fade before a scheduled transition", "fade", fun (arg) -> begin
+  requested_duration = float_of_string(default=2., arg)
+  transition_duration := if requested_duration > 0.05 then requested_duration else 0.05 end
+  transition_start := time()
+  transition_active := true
+  "OK"
+end)
+server.register(namespace="radio", description="Restore normal gain", "restore", fun (_) -> begin
+  transition_active := false
+  "OK"
+end)
 
 # ─── Salida Icecast ────────────────────────────────────────────────────────────
 output.icecast(

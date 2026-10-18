@@ -1,3 +1,5 @@
+import { movedShowTimes } from '../utils/schedule';
+import { DRAG_TYPE, dragData, readDrag } from '../components/ContentEditor';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -5,7 +7,7 @@ import {
   addDays, addWeeks, addMonths, subDays, subWeeks, subMonths,
   isSameDay, isToday, parseISO, differenceInMinutes, startOfDay,
 } from 'date-fns';
-import { getShows, getSettings } from '../api/client';
+import { getShows, getSettings, updateShow } from '../api/client';
 import ShowDetailModal from '../components/ShowDetailModal';
 import ScheduleShowModal from '../components/ScheduleShowModal';
 
@@ -33,7 +35,7 @@ export default function CalendarPage() {
 
   // Listen for schedule event from sidebar
   useEffect(() => {
-    const handler = () => qc.invalidateQueries(['shows']);
+    const handler = () => qc.invalidateQueries({ queryKey: ['shows'] });
     window.addEventListener('show-scheduled', handler);
     return () => window.removeEventListener('show-scheduled', handler);
   }, [qc]);
@@ -69,15 +71,17 @@ export default function CalendarPage() {
 
   const handleShowClick = (show) => setSelectedShow(show);
 
-  const handleShowChanged = async () => {
-    await qc.invalidateQueries(['shows']);
-    const updated = shows.find((s) => s.id === selectedShow?.id);
-    if (updated) setSelectedShow(updated);
-    else {
-      const res = await getShows({ start: rangeStart.toISOString(), end: rangeEnd.toISOString() });
-      const fresh = (res.data?.results || res.data || []).find((s) => s.id === selectedShow?.id);
-      setSelectedShow(fresh || null);
-    }
+  const handleShowChanged = async (updated) => {
+    if (updated?.id) setSelectedShow(updated);
+    await qc.invalidateQueries({ queryKey: ['shows'] });
+  };
+  const handleShowMove = async (data, start) => {
+    const show = shows.find(s => s.id === data.id);
+    if (!show) return;
+    try {
+      await updateShow(show.id, movedShowTimes(show, start));
+      await qc.invalidateQueries({ queryKey:['shows'] });
+    } catch (e) { alert('No se pudo mover el show. ' + JSON.stringify(e.response?.data || 'Intenta nuevamente.')); }
   };
 
   const slotsPerDay = (24 * 60) / slotMinutes;
@@ -136,9 +140,10 @@ export default function CalendarPage() {
       {isLoading ? (
         <div style={styles.loading}>Loading schedule…</div>
       ) : viewMode === 'Month' ? (
-        <MonthView days={days} shows={shows} currentDate={currentDate} onShowClick={handleShowClick} onDayClick={(d) => { setCurrentDate(d); setViewMode('Day'); }} />
+        <MonthView onShowMove={handleShowMove} days={days} shows={shows} currentDate={currentDate} onShowClick={handleShowClick} onDayClick={(d) => { setCurrentDate(d); setViewMode('Day'); }} />
       ) : (
         <TimeGrid
+          onShowMove={handleShowMove}
           ref={scrollRef}
           days={days}
           shows={shows}
@@ -162,9 +167,9 @@ export default function CalendarPage() {
         <ScheduleShowModal
           defaultStart={scheduleModal}
           onClose={() => setScheduleModal(null)}
-          onSaved={() => {
+          onCreated={() => {
             setScheduleModal(null);
-            qc.invalidateQueries(['shows']);
+            qc.invalidateQueries({ queryKey: ['shows'] });
           }}
         />
       )}
@@ -176,7 +181,7 @@ export default function CalendarPage() {
 // Time Grid (Day / Week)
 // ────────────────────────────────────────────────────────────
 const TimeGrid = React.forwardRef(function TimeGrid(
-  { days, shows, slotMinutes, slotsPerDay, slotHeight, onShowClick, onSlotClick },
+  { days, shows, slotMinutes, slotsPerDay, slotHeight, onShowClick, onSlotClick, onShowMove },
   ref
 ) {
   const [nowLine, setNowLine] = useState(getNowOffset(slotMinutes, slotHeight));
@@ -255,6 +260,7 @@ const TimeGrid = React.forwardRef(function TimeGrid(
               totalHeight={totalHeight}
               nowLine={isToday(day) ? nowLine : null}
               onShowClick={onShowClick}
+              onShowMove={onShowMove}
               onSlotClick={onSlotClick}
             />
           ))}
@@ -264,7 +270,7 @@ const TimeGrid = React.forwardRef(function TimeGrid(
   );
 });
 
-function DayColumn({ day, shows, slotMinutes, slotHeight, slotsPerDay, totalHeight, nowLine, onShowClick, onSlotClick }) {
+function DayColumn({ day, shows, slotMinutes, slotHeight, slotsPerDay, totalHeight, nowLine, onShowClick, onSlotClick, onShowMove }) {
   const slots = Array.from({ length: slotsPerDay }, (_, i) => i);
 
   const showsForDay = shows.map((show) => {
@@ -280,8 +286,24 @@ function DayColumn({ day, shows, slotMinutes, slotHeight, slotsPerDay, totalHeig
     return { ...show, top, height };
   });
 
+  // Lay out connected overlap groups in separate columns, keeping every show reachable.
+  const sorted = [...showsForDay].sort((a,b)=>a.top-b.top);
+  let group=[], groupEnd=-1;
+  const finishGroup=()=> { group.forEach(s=>{ s.lanes=group.length; }); };
+  sorted.forEach(s=> {
+    if (s.top >= groupEnd) { finishGroup(); group=[]; groupEnd=-1; }
+    s.lane=group.length; group.push(s); groupEnd=Math.max(groupEnd,s.top+s.height);
+  });
+  finishGroup();
+
   return (
-    <div style={{ flex: 1, position: 'relative', borderRight: '1px solid var(--border)' }}>
+    <div style={{ flex: 1, position: 'relative', borderRight: '1px solid var(--border)' }}
+      onDragOver={e => { if (e.dataTransfer.types.includes(DRAG_TYPE)) e.preventDefault(); }}
+      onDrop={e => {
+        e.preventDefault(); const d=readDrag(e); if (d?.kind !== 'show') return;
+        const minutes = Math.max(0, Math.min(1440-slotMinutes, Math.floor((e.clientY-e.currentTarget.getBoundingClientRect().top)/slotHeight)*slotMinutes));
+        const start=new Date(day); start.setHours(Math.floor(minutes/60), minutes%60, 0, 0); onShowMove(d,start);
+      }}>
       {/* Slot grid lines */}
       {slots.map((i) => {
         const h = Math.floor((i * slotMinutes) / 60);
@@ -309,7 +331,7 @@ function DayColumn({ day, shows, slotMinutes, slotHeight, slotsPerDay, totalHeig
 
       {/* Empty slot fill */}
       <div style={{
-        position: 'absolute', inset: 0,
+        position: 'absolute', inset: 0, pointerEvents: 'none',
         background: 'repeating-linear-gradient(to bottom, transparent 0px, transparent calc(var(--slot-h) - 1px), var(--border) calc(var(--slot-h) - 1px), var(--border) var(--slot-h))',
       }} />
 
@@ -322,7 +344,7 @@ function DayColumn({ day, shows, slotMinutes, slotHeight, slotsPerDay, totalHeig
       {nowLine !== null && (
         <div style={{
           position: 'absolute', left: 0, right: 0, top: nowLine,
-          height: 2, background: 'var(--red)', zIndex: 4,
+          height: 2, background: 'var(--red)', zIndex: 4, pointerEvents: 'none',
           boxShadow: '0 0 6px var(--red)',
         }}>
           <div style={{
@@ -344,7 +366,7 @@ function ShowBlock({ show, onShowClick }) {
       style={{
         position: 'absolute',
         top: show.top + 1,
-        left: 2, right: 2,
+        left: `calc(${(show.lane || 0) * 100 / (show.lanes || 1)}% + 2px)`, width: `calc(${100/(show.lanes || 1)}% - 4px)`,
         height: Math.max(show.height - 2, 12),
         background: show.color,
         opacity: 0.92,
@@ -357,8 +379,10 @@ function ShowBlock({ show, onShowClick }) {
         border: show.is_live ? '2px solid #fff' : 'none',
         transition: 'opacity 0.1s',
       }}
+      draggable
+      onDragStart={e => dragData(e, { kind:'show', id:show.id })}
       onClick={() => onShowClick(show)}
-      title={show.title}
+      title={`${show.title} · Arrastra para mover solo esta emisión`}
     >
       <div style={{ fontSize: 10, fontWeight: 600, color: '#fff', lineHeight: 1.3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
         {show.is_live && <span style={{ marginRight: 3 }}>●</span>}
@@ -379,7 +403,7 @@ function ShowBlock({ show, onShowClick }) {
 // ────────────────────────────────────────────────────────────
 // Month View
 // ────────────────────────────────────────────────────────────
-function MonthView({ days, shows, currentDate, onShowClick, onDayClick }) {
+function MonthView({ days, shows, currentDate, onShowClick, onDayClick, onShowMove }) {
   // days = all days in the month grid (may include prev/next month padding)
   return (
     <div style={styles.monthWrapper}>
@@ -408,6 +432,13 @@ function MonthView({ days, shows, currentDate, onShowClick, onDayClick }) {
                 background: isToday(day) ? 'var(--accent-glow)' : isCurrentMonth ? 'var(--bg-panel)' : 'var(--bg-secondary)',
                 cursor: 'pointer',
               }}
+              onDragOver={e => e.preventDefault()}
+              onDrop={e => {
+                e.preventDefault(); const d=readDrag(e); const show=shows.find(s=>s.id===d?.id);
+                if (d?.kind!=='show' || !show) return;
+                const old=new Date(show.start_time), start=new Date(day);
+                start.setHours(old.getHours(),old.getMinutes(),old.getSeconds(),0); onShowMove(d,start);
+              }}
               onClick={() => onDayClick(day)}
             >
               <div style={{
@@ -433,6 +464,7 @@ function MonthView({ days, shows, currentDate, onShowClick, onDayClick }) {
                     textOverflow: 'ellipsis',
                     cursor: 'pointer',
                   }}
+                  draggable onDragStart={e=>dragData(e,{kind:'show',id:show.id})}
                   onClick={(e) => { e.stopPropagation(); onShowClick(show); }}
                 >
                   {show.title}

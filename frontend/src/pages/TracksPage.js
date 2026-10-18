@@ -93,7 +93,7 @@ export default function TracksPage() {
           const res = await createFolder(folderName);
           const newFolder = res.data;
           targetFolderId = newFolder.id;
-          qc.invalidateQueries(['folders']);
+          qc.invalidateQueries({ queryKey: ['folders'] });
         } catch {}
       }
     }
@@ -141,8 +141,8 @@ export default function TracksPage() {
       }
     }
 
-    qc.invalidateQueries(['tracks']);
-    qc.invalidateQueries(['folders']);
+    qc.invalidateQueries({ queryKey: ['tracks'] });
+    qc.invalidateQueries({ queryKey: ['folders'] });
     setUploading(false);
     setTimeout(() => setUploadProgress([]), 4000);
   };
@@ -152,7 +152,7 @@ export default function TracksPage() {
     if (!newFolderName.trim()) return;
     try {
       await createFolder(newFolderName.trim());
-      qc.invalidateQueries(['folders']);
+      qc.invalidateQueries({ queryKey: ['folders'] });
       setNewFolderName('');
       setShowNewFolder(false);
     } catch {}
@@ -162,16 +162,16 @@ export default function TracksPage() {
   const handleDeleteFolder = async (folder) => {
     if (!window.confirm(`¿Eliminar la carpeta "${folder.name}"?\nLos tracks quedarán sin carpeta.`)) return;
     await deleteFolder(folder.id);
-    qc.invalidateQueries(['folders']);
-    qc.invalidateQueries(['tracks']);
+    qc.invalidateQueries({ queryKey: ['folders'] });
+    qc.invalidateQueries({ queryKey: ['tracks'] });
   };
 
   // ── Borrar track ────────────────────────────────────────────────
   const handleDelete = async (id, title) => {
     if (!window.confirm(`¿Eliminar "${title}"?`)) return;
     await deleteTrack(id);
-    qc.invalidateQueries(['tracks']);
-    qc.invalidateQueries(['folders']);
+    qc.invalidateQueries({ queryKey: ['tracks'] });
+    qc.invalidateQueries({ queryKey: ['folders'] });
   };
 
   // ── Mover track a carpeta ───────────────────────────────────────
@@ -179,8 +179,8 @@ export default function TracksPage() {
     setMovingTrack(trackId);
     try {
       await moveTrack(trackId, folderId);
-      qc.invalidateQueries(['tracks']);
-      qc.invalidateQueries(['folders']);
+      qc.invalidateQueries({ queryKey: ['tracks'] });
+      qc.invalidateQueries({ queryKey: ['folders'] });
     } finally {
       setMovingTrack(null);
     }

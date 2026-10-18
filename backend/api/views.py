@@ -7,6 +7,11 @@ from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from django.utils import timezone
 from django.db.models import Q
+from django.db import transaction
+from rest_framework.exceptions import ValidationError
+from django.shortcuts import get_object_or_404
+from django.utils.dateparse import parse_datetime
+from .scheduling import active_show, ensure_occurrences, sync_content
 from datetime import datetime, timedelta
 import mutagen
 import mutagen.wave
@@ -222,34 +227,74 @@ class PlaylistViewSet(viewsets.ModelViewSet):
         serializer.save(created_by=self.request.user)
 
     @action(detail=True, methods=['post'])
+    @transaction.atomic
     def add_track(self, request, pk=None):
-        playlist = self.get_object()
-        track_id = request.data.get('track_id')
-        position = playlist.playlist_tracks.count()
-        try:
-            track = Track.objects.get(id=track_id)
-            PlaylistTrack.objects.create(playlist=playlist, track=track, position=position)
-            return Response(PlaylistSerializer(playlist).data)
-        except Track.DoesNotExist:
-            return Response({'error': 'Track not found'}, status=404)
+        playlist = Playlist.objects.select_for_update().get(pk=self.get_object().pk)
+        tracks = requested_tracks(request.data)
+        items = list(playlist.playlist_tracks.order_by('position', 'id'))
+        pos = insertion_position(request.data, len(items))
+        ids = [i.track_id for i in items]
+        ids[pos:pos] = [t.id for t in tracks]
+        # Rebuild only inside the transaction; old entry IDs are preserved.
+        new = [PlaylistTrack(playlist=playlist, track=t, position=len(items)+i) for i,t in enumerate(tracks)]
+        PlaylistTrack.objects.bulk_create(new)
+        items[pos:pos] = new
+        save_order(items)
+        return Response(PlaylistSerializer(playlist).data)
 
     @action(detail=True, methods=['post'])
+    @transaction.atomic
     def remove_track(self, request, pk=None):
-        playlist = self.get_object()
-        item_id = request.data.get('item_id')
-        PlaylistTrack.objects.filter(id=item_id, playlist=playlist).delete()
-        for i, pt in enumerate(playlist.playlist_tracks.all()):
-            pt.position = i
-            pt.save()
+        playlist = Playlist.objects.select_for_update().get(pk=self.get_object().pk)
+        get_object_or_404(PlaylistTrack, id=request.data.get('item_id'), playlist=playlist).delete()
+        save_order(list(playlist.playlist_tracks.order_by('position', 'id')))
         return Response(PlaylistSerializer(playlist).data)
 
     @action(detail=True, methods=['post'])
+    @transaction.atomic
     def reorder(self, request, pk=None):
-        playlist = self.get_object()
-        order = request.data.get('order', [])
-        for i, item_id in enumerate(order):
-            PlaylistTrack.objects.filter(id=item_id, playlist=playlist).update(position=i)
+        playlist = Playlist.objects.select_for_update().get(pk=self.get_object().pk)
+        items = list(playlist.playlist_tracks.order_by('position', 'id'))
+        save_order(validated_order(items, request.data.get('order')))
         return Response(PlaylistSerializer(playlist).data)
+
+
+def insertion_position(data, length):
+    pos = data.get('position', length)
+    if type(pos) is not int or not 0 <= pos <= length:
+        raise ValidationError({'position': 'Posición inválida; actualiza el contenido.'})
+    return pos
+
+
+def requested_tracks(data):
+    if data.get('playlist_id'):
+        pl = get_object_or_404(Playlist, pk=data['playlist_id'])
+        return [x.track for x in pl.playlist_tracks.select_related('track').order_by('position', 'id')]
+    ids = data.get('track_ids') or ([data['track_id']] if data.get('track_id') else [])
+    if not isinstance(ids, list) or not ids or len(ids) > 2000:
+        raise ValidationError({'track_ids': 'Selecciona entre 1 y 2000 pistas.'})
+    try:
+        return [get_object_or_404(Track, pk=i) for i in ids]
+    except (ValueError, TypeError):
+        raise ValidationError({'track_ids': 'Identificador inválido.'})
+
+
+def validated_order(items, order):
+    if not isinstance(order, list) or any(type(i) is not int for i in order):
+        raise ValidationError({'order': 'Se requiere la lista completa de IDs de contenido.'})
+    by_id = {i.id: i for i in items}
+    if len(order) != len(by_id) or set(order) != set(by_id):
+        raise ValidationError({'order': 'El contenido cambió. Actualiza e intenta de nuevo.'})
+    return [by_id[i] for i in order]
+
+
+def save_order(items):
+    # Two phases avoid unique(playlist, position) collisions even on SQLite.
+    offset = max([x.position for x in items] or [0]) + len(items) + 1
+    for i, item in enumerate(items):
+        type(item).objects.filter(pk=item.pk).update(position=offset+i)
+    for i, item in enumerate(items):
+        type(item).objects.filter(pk=item.pk).update(position=i)
 
 
 def _get_next_color():
@@ -267,136 +312,114 @@ class ShowViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        qs = Show.objects.prefetch_related('show_items__track').all()
+        qs = Show.objects.filter(cancelled=False).prefetch_related('show_items__track')
         start = self.request.query_params.get('start')
         end = self.request.query_params.get('end')
+        if self.action == 'list':
+            try:
+                first = parse_datetime(start) if start else timezone.now()-timedelta(days=1)
+                last = parse_datetime(end) if end else timezone.now()+timedelta(days=90)
+                if not first or not last or timezone.is_naive(first) or timezone.is_naive(last) or last < first or last-first > timedelta(days=370):
+                    raise ValueError()
+            except (ValueError, TypeError):
+                raise ValidationError('Consulta un rango válido con zona horaria de hasta 370 días.')
+            ensure_occurrences(first, last)
         if start:
-            qs = qs.filter(end_time__gte=start)
+            qs = qs.filter(end_time__gt=start)
         if end:
-            qs = qs.filter(start_time__lte=end)
+            qs = qs.filter(start_time__lt=end)
         return qs.order_by('start_time')
 
+    @transaction.atomic
     def perform_create(self, serializer):
-        data = self.request.data
-        color = data.get('color') or _get_next_color()
-        show = serializer.save(created_by=self.request.user, color=color)
+        show = serializer.save(created_by=self.request.user, color=self.request.data.get('color') or _get_next_color())
+        show.recurrence_time = show.start_time
+        show.save(update_fields=['recurrence_time'])
+        if show.repeat != 'none':
+            ensure_occurrences(show.start_time, show.start_time+timedelta(days=90))
 
-        repeat = data.get('repeat', 'none')
-        repeat_until = data.get('repeat_until')
-        repeat_days = data.get('repeat_days', [])
-
-        if repeat != 'none':
-            self._create_occurrences(show, repeat, repeat_until, repeat_days)
-
-    def _create_occurrences(self, parent, repeat, repeat_until_str, repeat_days):
-        if repeat_until_str:
-            try:
-                until = datetime.fromisoformat(repeat_until_str).date()
-            except (ValueError, TypeError):
-                until = (parent.start_time + timedelta(days=365)).date()
-        else:
-            until = (parent.start_time + timedelta(days=365)).date()
-
-        duration = parent.end_time - parent.start_time
-        current = parent.start_time
-        occurrences = []
-        max_occurrences = 500
-
-        while len(occurrences) < max_occurrences:
-            if repeat == 'daily':
-                current = current + timedelta(days=1)
-            elif repeat == 'weekly':
-                current = current + timedelta(weeks=1)
-            elif repeat == 'monthly':
-                month = current.month + 1
-                year = current.year
-                if month > 12:
-                    month = 1
-                    year += 1
-                try:
-                    current = current.replace(year=year, month=month)
-                except ValueError:
-                    current = current.replace(year=year, month=month, day=28)
-            elif repeat == 'custom_days':
-                current = current + timedelta(days=1)
-                if current.date() > until:
-                    break
-                if current.weekday() not in [int(d) for d in repeat_days]:
-                    continue
-            else:
-                break
-
-            if current.date() > until:
-                break
-
-            end = current + duration
-            overlap = Show.objects.filter(
-                start_time__lt=end,
-                end_time__gt=current
-            ).exists()
-            if not overlap:
-                occurrences.append(Show(
-                    title=parent.title,
-                    color=parent.color,
-                    start_time=current,
-                    end_time=end,
-                    repeat='none',
-                    parent_show=parent,
-                    created_by=parent.created_by
-                ))
-
-        Show.objects.bulk_create(occurrences)
-
+    @transaction.atomic
     def update(self, request, *args, **kwargs):
-        instance = self.get_object()
+        original = self.get_object()
+        Show.objects.select_for_update().get(pk=original.parent_show_id or original.id)
         response = super().update(request, *args, **kwargs)
-        if instance.parent_show is None:
-            title = request.data.get('title')
-            color = request.data.get('color')
-            updates = {}
-            if title:
-                updates['title'] = title
-            if color:
-                updates['color'] = color
+        instance = Show.objects.get(pk=original.id)
+        if any(k in request.data for k in ('start_time', 'end_time')):
+            instance.priority_at = timezone.now()
+            instance.save(update_fields=['priority_at'])
+        if not instance.parent_show_id:
+            updates = {k: request.data[k] for k in ('title', 'color') if k in request.data}
             if updates:
-                Show.objects.filter(parent_show=instance).update(**updates)
-        return response
+                instance.occurrences.update(**updates)
+            if any(k in request.data for k in ('repeat', 'repeat_days', 'repeat_until')):
+                instance.occurrences.filter(start_time__gt=timezone.now(), cancelled=False).delete()
+                ensure_occurrences()
+        return Response(ShowSerializer(instance).data)
+
+    @transaction.atomic
+    def destroy(self, request, *args, **kwargs):
+        show = self.get_object()
+        root = Show.objects.select_for_update().get(pk=show.parent_show_id or show.id)
+        scope = request.query_params.get('scope', 'one')
+        if scope == 'series':
+            root.delete()  # Includes template, occurrences, tombstones and their content.
+        elif scope == 'one':
+            show.cancelled = True  # Tombstone prevents regeneration of this slot.
+            show.is_live = False
+            show.save(update_fields=['cancelled', 'is_live'])
+        else:
+            raise ValidationError('scope debe ser one o series.')
+        return Response(status=204)
+
+    def _locked_show(self):
+        obj = self.get_object()
+        Show.objects.select_for_update().get(pk=obj.parent_show_id or obj.id)
+        return Show.objects.get(pk=obj.id)
+
+    def _content_response(self, show):
+        sync_content(show)
+        return Response(ShowSerializer(Show.objects.get(pk=show.id)).data)
 
     @action(detail=True, methods=['post'])
+    @transaction.atomic
     def add_item(self, request, pk=None):
-        show = self.get_object()
-        track_id = request.data.get('track_id')
-        playlist_id = request.data.get('playlist_id')
+        show = self._locked_show()
+        tracks = requested_tracks(request.data)
+        items = list(show.show_items.order_by('position', 'id'))
+        pos = insertion_position(request.data, len(items))
 
-        if track_id:
-            try:
-                track = Track.objects.get(id=track_id)
-                pos = show.show_items.count()
-                ShowItem.objects.create(show=show, track=track, position=pos)
-            except Track.DoesNotExist:
-                return Response({'error': 'Track not found'}, status=404)
+        # Crear individualmente para disponer inmediatamente del PK.
+        # Esto permite que save_order() pueda actualizar correctamente
+        # la posición de los elementos recién creados.
+        new = [
+            ShowItem.objects.create(
+                show=show,
+                track=track,
+                position=len(items) + i
+            )
+            for i, track in enumerate(tracks)
+        ]
 
-        elif playlist_id:
-            try:
-                playlist = Playlist.objects.get(id=playlist_id)
-                pos = show.show_items.count()
-                for pt in playlist.playlist_tracks.all():
-                    ShowItem.objects.create(show=show, track=pt.track, position=pos)
-                    pos += 1
-            except Playlist.DoesNotExist:
-                return Response({'error': 'Playlist not found'}, status=404)
+        # Insertar en la posición solicitada y renumerar una sola vez.
+        items[pos:pos] = new
+        save_order(items)
 
-        return Response(ShowSerializer(show).data)
+        return self._content_response(show)
 
     @action(detail=True, methods=['post'])
+    @transaction.atomic
     def remove_item(self, request, pk=None):
-        show = self.get_object()
-        item_id = request.data.get('item_id')
-        ShowItem.objects.filter(id=item_id, show=show).delete()
-        for i, item in enumerate(show.show_items.all()):
-            item.position = i
-            item.save()
-        return Response(ShowSerializer(show).data)
+        show = self._locked_show()
+        get_object_or_404(ShowItem, id=request.data.get('item_id'), show=show).delete()
+        save_order(list(show.show_items.order_by('position', 'id')))
+        return self._content_response(show)
+
+    @action(detail=True, methods=['post'])
+    @transaction.atomic
+    def reorder(self, request, pk=None):
+        show = self._locked_show()
+        save_order(validated_order(list(show.show_items.order_by('position', 'id')), request.data.get('order')))
+        return self._content_response(show)
 
     @action(detail=True, methods=['post'])
     def go_live(self, request, pk=None):
@@ -451,9 +474,7 @@ def radio_status_view(request):
     show_data = None
     if state in ("show",):
         now = timezone.now()
-        show = Show.objects.filter(is_live=True, end_time__gte=now).first()
-        if not show:
-            show = Show.objects.filter(start_time__lte=now, end_time__gte=now).first()
+        show = active_show(now)
         if show:
             show_data = ShowSerializer(show).data
 

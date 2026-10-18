@@ -1,6 +1,6 @@
+import ContentEditor from './ContentEditor';
 import React, { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { createShow, getTracks, getPlaylists, addItemToShow, removeItemFromShow, getFolders } from '../api/client';
+import { createShow } from '../api/client';
 import { format } from 'date-fns';
 
 const DAYS = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
@@ -138,7 +138,7 @@ function StepBasic({ onCreated, onClose, defaultStart }) {
 
       {repeat !== 'none' && (
         <div className="form-group">
-          <label>Repetir hasta</label>
+          <label>Repetir hasta (vacío = indefinidamente)</label>
           <input type="date" value={repeatUntil} onChange={(e) => setRepeatUntil(e.target.value)} />
         </div>
       )}
@@ -155,280 +155,11 @@ function StepBasic({ onCreated, onClose, defaultStart }) {
 
 // ─── Paso 2: Contenido del show ──────────────────────────────────────────────
 function StepContent({ show, onDone }) {
-  const [tab, setTab]           = useState('tracks');
-  const [search, setSearch]     = useState('');
-  const [adding, setAdding]     = useState(null);
-  const [items, setItems]       = useState(show.show_items || []);
-  // Navegación por carpetas en el picker de tracks
-  const [trackView, setTrackView]         = useState('all'); // 'all' | 'folders'
-  const [selectedFolder, setSelectedFolder] = useState(null); // { id, name } | null
-
-  // Params de tracks según vista
-  const trackParams = (() => {
-    if (search) return { search };
-    if (trackView === 'folders') {
-      if (selectedFolder) return { folder_id: selectedFolder.id };
-      return { no_folder: '1' };
-    }
-    return {};
-  })();
-
-  const { data: tracksData } = useQuery({
-    queryKey: ['tracks', trackParams],
-    queryFn: () => getTracks(trackParams),
-  });
-  const { data: playlistsData } = useQuery({
-    queryKey: ['playlists'],
-    queryFn: getPlaylists,
-  });
-  const { data: foldersData } = useQuery({
-    queryKey: ['folders'],
-    queryFn: getFolders,
-    enabled: tab === 'tracks',
-  });
-
-  const tracks    = tracksData?.data?.results || tracksData?.data || [];
-  const playlists = playlistsData?.data?.results || playlistsData?.data || [];
-  const folders   = foldersData?.data?.results || foldersData?.data || [];
-
-  const totalDur  = show.duration_seconds || ((new Date(show.end_time) - new Date(show.start_time)) / 1000);
-  const usedDur   = items.reduce((acc, item) => acc + (item.track?.duration || 0), 0);
-  const fillPct   = totalDur > 0 ? Math.min(100, (usedDur / totalDur) * 100) : 0;
-  const remaining = totalDur - usedDur;
-  const fillColor = fillPct >= 100 ? 'var(--red)' : fillPct > 60 ? 'var(--yellow)' : 'var(--green)';
-
-  const handleAddTrack = async (track) => {
-    setAdding(track.id);
-    try {
-      const res = await addItemToShow(show.id, { track_id: track.id });
-      setItems((prev) => [...prev, res.data]);
-    } catch (err) {
-      alert(err.response?.data?.error || 'No se pudo agregar la pista');
-    } finally {
-      setAdding(null);
-    }
-  };
-
-  const handleAddPlaylist = async (pl) => {
-    setAdding(pl.id);
-    try {
-      const res = await addItemToShow(show.id, { playlist_id: pl.id });
-      const newItems = Array.isArray(res.data) ? res.data : [res.data];
-      setItems((prev) => [...prev, ...newItems]);
-    } catch (err) {
-      alert(err.response?.data?.error || 'No se pudo agregar la playlist');
-    } finally {
-      setAdding(null);
-    }
-  };
-
-  const handleRemove = async (itemId) => {
-    try {
-      await removeItemFromShow(show.id, itemId);
-      setItems((prev) => prev.filter((i) => i.id !== itemId));
-    } catch {}
-  };
-
-  return (
-    <div>
-      {/* Encabezado del show */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14,
-        paddingBottom: 12, borderBottom: '1px solid var(--border)' }}>
-        <div style={{ width: 12, height: 12, borderRadius: 3, background: show.color, flexShrink: 0 }} />
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 14, fontWeight: 600 }}>{show.title}</div>
-          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
-            {format(new Date(show.start_time), 'dd MMM yyyy HH:mm')} →{' '}
-            {format(new Date(show.end_time), 'HH:mm')}
-            {' · '}{fmtDur(totalDur)} total
-          </div>
-        </div>
-        <span style={{ fontSize: 11, color: 'var(--green)', background: 'var(--green-dim)',
-          padding: '2px 8px', borderRadius: 10 }}>✓ Programado</span>
-      </div>
-
-      {/* Barra de llenado */}
-      <div style={{ marginBottom: 14 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11,
-          color: 'var(--text-secondary)', marginBottom: 5 }}>
-          <span>Contenido: {fmtDur(usedDur)} / {fmtDur(totalDur)}</span>
-          <span style={{ color: fillColor }}>
-            {fillPct.toFixed(0)}% lleno · {remaining > 0 ? fmtDur(remaining) + ' disponible' : 'Completo'}
-          </span>
-        </div>
-        <div style={{ height: 6, background: 'var(--bg-primary)', borderRadius: 3, overflow: 'hidden' }}>
-          <div style={{ height: '100%', width: `${fillPct}%`, background: fillColor,
-            borderRadius: 3, transition: 'width 0.3s' }} />
-        </div>
-      </div>
-
-      {/* Lista de items ya agregados */}
-      {items.length > 0 && (
-        <div style={{ marginBottom: 14 }}>
-          <div style={s.sectionLabel}>Contenido del show ({items.length} pistas)</div>
-          <div style={{ maxHeight: 140, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 6 }}>
-            {items.map((item, i) => (
-              <div key={item.id} style={{ display: 'flex', alignItems: 'center', padding: '6px 10px',
-                borderBottom: i < items.length - 1 ? '1px solid var(--border)' : 'none', gap: 8 }}>
-                <span style={{ color: 'var(--text-muted)', fontSize: 11, width: 18, flexShrink: 0 }}>{i + 1}</span>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 12, fontWeight: 500, whiteSpace: 'nowrap',
-                    overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.track?.title}</div>
-                  <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{item.track?.artist}</div>
-                </div>
-                <span style={{ fontSize: 11, color: 'var(--text-secondary)',
-                  fontFamily: 'var(--font-mono)', flexShrink: 0 }}>{fmtDur(item.track?.duration)}</span>
-                <button style={{ background: 'none', border: 'none', color: 'var(--text-muted)',
-                  cursor: 'pointer', fontSize: 14, padding: '0 4px' }}
-                  onClick={() => handleRemove(item.id)}>×</button>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Tabs */}
-      <div style={{ marginBottom: 12 }}>
-        <div style={s.sectionLabel}>Agregar contenido</div>
-        <div style={{ display: 'flex', gap: 0, marginBottom: 10,
-          border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' }}>
-          {['tracks', 'playlists'].map((t) => (
-            <button key={t} className="btn" style={{
-              flex: 1, justifyContent: 'center', borderRadius: 0, padding: '7px',
-              background: tab === t ? 'var(--bg-active)' : 'var(--bg-panel)',
-              color: tab === t ? 'var(--text-primary)' : 'var(--text-muted)',
-              borderRight: t === 'tracks' ? '1px solid var(--border)' : 'none', fontSize: 12,
-            }} onClick={() => setTab(t)}>
-              {t === 'tracks' ? 'Pistas' : 'Playlists'}
-            </button>
-          ))}
-        </div>
-
-        {tab === 'tracks' && (
-          <>
-            {/* Controles de vista */}
-            <div style={{ display: 'flex', gap: 6, marginBottom: 8, alignItems: 'center' }}>
-              <input
-                placeholder="Buscar pistas…"
-                value={search}
-                onChange={(e) => { setSearch(e.target.value); setTrackView('all'); setSelectedFolder(null); }}
-                style={{ flex: 1 }}
-              />
-              {!search && (
-                <div style={{ display: 'flex', border: '1px solid var(--border)', borderRadius: 5, overflow: 'hidden', flexShrink: 0 }}>
-                  <button
-                    style={{ ...s.viewToggle, background: trackView === 'all' ? 'var(--bg-active)' : 'var(--bg-panel)' }}
-                    onClick={() => { setTrackView('all'); setSelectedFolder(null); }}
-                    title="Ver todos"
-                  >≡ Todos</button>
-                  <button
-                    style={{ ...s.viewToggle, background: trackView === 'folders' ? 'var(--bg-active)' : 'var(--bg-panel)', borderLeft: '1px solid var(--border)' }}
-                    onClick={() => { setTrackView('folders'); setSelectedFolder(null); }}
-                    title="Ver por carpetas"
-                  >📁 Carpetas</button>
-                </div>
-              )}
-            </div>
-
-            {/* Navegación de carpetas */}
-            {trackView === 'folders' && !search && (
-              <div style={{ marginBottom: 6 }}>
-                {selectedFolder ? (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--text-secondary)' }}>
-                    <button
-                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--accent)', fontSize: 11, padding: 0 }}
-                      onClick={() => setSelectedFolder(null)}
-                    >← Carpetas</button>
-                    <span>/</span>
-                    <span style={{ fontWeight: 600 }}>📁 {selectedFolder.name}</span>
-                  </div>
-                ) : (
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                    <button
-                      style={s.folderChip}
-                      onClick={() => setSelectedFolder({ id: '__none__', name: 'Sin carpeta' })}
-                    >
-                      🎵 Sin carpeta
-                    </button>
-                    {folders.map((f) => (
-                      <button key={f.id} style={s.folderChip} onClick={() => setSelectedFolder(f)}>
-                        📁 {f.name} <span style={{ opacity: 0.6, fontSize: 10 }}>({f.track_count})</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Lista de tracks */}
-            <div style={{ maxHeight: 200, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 6 }}>
-              {/* Si estamos en vista carpetas y no hay carpeta seleccionada, mostrar mensaje */}
-              {trackView === 'folders' && !search && !selectedFolder ? (
-                <div style={{ padding: 20, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
-                  Selecciona una carpeta arriba
-                </div>
-              ) : tracks.length === 0 ? (
-                <div style={{ padding: 20, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
-                  No se encontraron pistas
-                </div>
-              ) : (
-                tracks.map((track, i) => (
-                  <div key={track.id} style={{ display: 'flex', alignItems: 'center', padding: '7px 10px',
-                    borderBottom: i < tracks.length - 1 ? '1px solid var(--border)' : 'none', gap: 8 }}>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 12, fontWeight: 500, whiteSpace: 'nowrap',
-                        overflow: 'hidden', textOverflow: 'ellipsis' }}>{track.title}</div>
-                      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                        {track.artist || '—'}
-                        {track.folder_name && trackView === 'all' && !search && (
-                          <span style={{ marginLeft: 6, opacity: 0.6 }}>· 📁 {track.folder_name}</span>
-                        )}
-                      </div>
-                    </div>
-                    <span style={{ fontSize: 11, color: 'var(--text-secondary)',
-                      fontFamily: 'var(--font-mono)', flexShrink: 0 }}>{fmtDur(track.duration)}</span>
-                    <button className="btn btn-primary btn-sm"
-                      onClick={() => handleAddTrack(track)}
-                      disabled={adding === track.id || fillPct >= 100}>
-                      {adding === track.id ? '…' : '+'}
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
-          </>
-        )}
-
-        {tab === 'playlists' && (
-          <div style={{ maxHeight: 240, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 6 }}>
-            {playlists.length === 0
-              ? <div style={{ padding: 20, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>No hay playlists</div>
-              : playlists.map((pl, i) => (
-                <div key={pl.id} style={{ display: 'flex', alignItems: 'center', padding: '8px 10px',
-                  borderBottom: i < playlists.length - 1 ? '1px solid var(--border)' : 'none', gap: 8 }}>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 12, fontWeight: 500 }}>{pl.name}</div>
-                    <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                      {pl.track_count} pistas · {fmtDur(pl.total_duration)}
-                    </div>
-                  </div>
-                  <button className="btn btn-primary btn-sm"
-                    onClick={() => handleAddPlaylist(pl)}
-                    disabled={adding === pl.id}>
-                    {adding === pl.id ? '…' : '+ Todo'}
-                  </button>
-                </div>
-              ))
-            }
-          </div>
-        )}
-      </div>
-
-      <div className="modal-footer">
-        <button className="btn btn-primary" onClick={onDone}>Listo ✓</button>
-      </div>
-    </div>
-  );
+  const [current, setCurrent] = useState(show);
+  return <div><h3>{show.title}</h3>
+    <ContentEditor kind="shows" value={current} onChanged={setCurrent} />
+    <div className="modal-footer"><button className="btn btn-primary" onClick={onDone}>Listo ✓</button></div>
+  </div>;
 }
 
 // ─── Modal principal ─────────────────────────────────────────────────────────
@@ -443,6 +174,7 @@ export default function ScheduleShowModal({ onClose, defaultStart, onCreated: on
 
   const handleDone = () => {
     if (onCreatedExternal) onCreatedExternal(show);
+    window.dispatchEvent(new Event('show-scheduled'));
     onClose();
   };
 
@@ -486,7 +218,7 @@ const s = {
   modal: {
     background: 'var(--bg-secondary)',
     borderRadius: 12,
-    width: '100%', maxWidth: 560,
+    width: '100%', maxWidth: 1080,
     maxHeight: '90vh',
     display: 'flex', flexDirection: 'column',
     boxShadow: '0 20px 60px rgba(0,0,0,0.4)',

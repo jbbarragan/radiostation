@@ -1,8 +1,8 @@
+import ContentEditor from '../components/ContentEditor';
 import React, { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   getPlaylists, createPlaylist, deletePlaylist,
-  getTracks, addTrackToPlaylist, removeTrackFromPlaylist,
 } from '../api/client';
 
 function fmtDur(sec) {
@@ -16,14 +16,11 @@ export default function PlaylistsPage() {
   const [selected, setSelected] = useState(null);
   const [newName, setNewName] = useState('');
   const [creating, setCreating] = useState(false);
-  const [trackSearch, setTrackSearch] = useState('');
   const qc = useQueryClient();
 
   const { data: plData } = useQuery({ queryKey: ['playlists'], queryFn: getPlaylists });
-  const { data: trData } = useQuery({ queryKey: ['tracks', trackSearch], queryFn: () => getTracks({ search: trackSearch }) });
 
   const playlists = plData?.data?.results || plData?.data || [];
-  const tracks = trData?.data?.results || trData?.data || [];
   const selectedPl = playlists.find((p) => p.id === selected);
 
   const handleCreate = async (e) => {
@@ -32,7 +29,7 @@ export default function PlaylistsPage() {
     setCreating(true);
     try {
       const res = await createPlaylist({ name: newName.trim(), description: '' });
-      qc.invalidateQueries(['playlists']);
+      qc.invalidateQueries({ queryKey: ['playlists'] });
       setSelected(res.data.id);
       setNewName('');
     } finally {
@@ -43,20 +40,8 @@ export default function PlaylistsPage() {
   const handleDelete = async (pl) => {
     if (!window.confirm(`Delete playlist "${pl.name}"?`)) return;
     await deletePlaylist(pl.id);
-    qc.invalidateQueries(['playlists']);
+    qc.invalidateQueries({ queryKey: ['playlists'] });
     if (selected === pl.id) setSelected(null);
-  };
-
-  const handleAddTrack = async (trackId) => {
-    if (!selected) return;
-    await addTrackToPlaylist(selected, trackId);
-    qc.invalidateQueries(['playlists']);
-  };
-
-  const handleRemoveItem = async (itemId) => {
-    if (!selected) return;
-    await removeTrackFromPlaylist(selected, itemId);
-    qc.invalidateQueries(['playlists']);
   };
 
   return (
@@ -126,63 +111,8 @@ export default function PlaylistsPage() {
               </div>
 
               <div style={styles.detailBody}>
-                {/* Current tracks in playlist */}
-                <div style={styles.section}>
-                  <div style={styles.sectionLabel}>Playlist Tracks</div>
-                  {selectedPl.playlist_tracks?.length === 0 ? (
-                    <div style={{ padding: '16px', color: 'var(--text-muted)', fontSize: 12, textAlign: 'center' }}>Empty playlist</div>
-                  ) : (
-                    <div style={styles.trackListInner}>
-                      {selectedPl.playlist_tracks?.map((item, i) => (
-                        <div key={item.id} style={styles.trackRow}>
-                          <span style={{ color: 'var(--text-muted)', fontSize: 11, width: 20, flexShrink: 0 }}>{i + 1}</span>
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ fontSize: 12, fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.track.title}</div>
-                            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{item.track.artist || '—'}</div>
-                          </div>
-                          <span style={{ fontSize: 11, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', flexShrink: 0 }}>{fmtDur(item.track.duration)}</span>
-                          <button
-                            style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: 16, padding: '0 4px' }}
-                            onClick={() => handleRemoveItem(item.id)}
-                          >×</button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                {/* Add tracks */}
-                <div style={styles.section}>
-                  <div style={styles.sectionLabel}>Add Tracks</div>
-                  <input
-                    placeholder="Search tracks…"
-                    value={trackSearch}
-                    onChange={(e) => setTrackSearch(e.target.value)}
-                    style={{ width: '100%', marginBottom: 8 }}
-                  />
-                  <div style={styles.trackListInner}>
-                    {tracks.map((track, i) => {
-                      const alreadyIn = selectedPl.playlist_tracks?.some((pt) => pt.track.id === track.id);
-                      return (
-                        <div key={track.id} style={{ ...styles.trackRow, opacity: alreadyIn ? 0.5 : 1 }}>
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ fontSize: 12, fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{track.title}</div>
-                            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{track.artist || '—'}</div>
-                          </div>
-                          <span style={{ fontSize: 11, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', flexShrink: 0 }}>{fmtDur(track.duration)}</span>
-                          <button
-                            className="btn btn-primary btn-sm"
-                            onClick={() => handleAddTrack(track.id)}
-                            disabled={alreadyIn}
-                          >+</button>
-                        </div>
-                      );
-                    })}
-                    {tracks.length === 0 && (
-                      <div style={{ padding: 16, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>No tracks found</div>
-                    )}
-                  </div>
-                </div>
+                <ContentEditor key={selectedPl.id} kind="playlists" value={selectedPl}
+                  onChanged={async () => { await qc.invalidateQueries({ queryKey: ['playlists'] }); }} />
               </div>
             </div>
           )}
@@ -211,7 +141,7 @@ const styles = {
   rightPanel: { flex: 1, overflow: 'hidden', display: 'flex' },
   detail: { flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' },
   detailHeader: { padding: '16px 20px', borderBottom: '1px solid var(--border)', background: 'var(--bg-secondary)', flexShrink: 0, display: 'flex', justifyContent: 'space-between', alignItems: 'center' },
-  detailBody: { flex: 1, overflow: 'auto', display: 'flex', gap: 0 },
+  detailBody: { flex: 1, overflow: 'auto', padding: '12px 16px' },
   section: { flex: 1, padding: '16px 20px', borderRight: '1px solid var(--border)', display: 'flex', flexDirection: 'column', minWidth: 0 },
   sectionLabel: { fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10 },
   trackListInner: { flex: 1, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 6 },

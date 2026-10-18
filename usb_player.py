@@ -12,6 +12,7 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "radiostation.settings")
 django.setup()
 
 from api.models import Show
+from api.scheduling import active_show
 from datetime import datetime, timezone as tz
 
 BACKUP_DIR = "/home/radioadmin/radiostation-fixed/backup"
@@ -25,9 +26,7 @@ def get_tracks():
     return tracks
 
 def has_active_show():
-    now = datetime.now(tz.utc)
-    return Show.objects.filter(is_live=True).exists() or \
-           Show.objects.filter(start_time__lte=now, end_time__gte=now).exists()
+    return active_show() is not None
 
 def play(track):
     global current_proc

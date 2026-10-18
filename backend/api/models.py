@@ -1,6 +1,7 @@
 from django.db import models
 from django.contrib.auth.models import User
 import uuid
+from django.utils import timezone
 
 
 class TrackFolder(models.Model):
@@ -88,11 +89,15 @@ class Show(models.Model):
     repeat_until = models.DateField(null=True, blank=True)
     parent_show = models.ForeignKey('self', null=True, blank=True, on_delete=models.CASCADE, related_name='occurrences')
     is_live = models.BooleanField(default=False)
+    cancelled = models.BooleanField(default=False)
+    recurrence_time = models.DateTimeField(null=True, blank=True)
+    priority_at = models.DateTimeField(default=timezone.now)
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ['start_time']
+        constraints = [models.UniqueConstraint(fields=['parent_show', 'recurrence_time'], name='unique_show_occurrence')]
 
     def __str__(self):
         return f"{self.title} ({self.start_time})"

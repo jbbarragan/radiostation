@@ -72,11 +72,11 @@ class ShowSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'title', 'color', 'start_time', 'end_time',
             'repeat', 'repeat_days', 'repeat_until',
-            'parent_show', 'is_live', 'show_items',
+            'parent_show', 'is_live', 'show_items', 'cancelled', 'priority_at',
             'content_duration', 'duration_seconds', 'fill_percentage',
             'created_at'
         ]
-        read_only_fields = ['id', 'created_at']
+        read_only_fields = ['id', 'created_at', 'parent_show', 'cancelled', 'priority_at']
 
     def get_fill_percentage(self, obj):
         total = obj.duration_seconds
@@ -89,6 +89,15 @@ class ShowSerializer(serializers.ModelSerializer):
         end = data.get('end_time', getattr(self.instance, 'end_time', None))
         if start and end and start >= end:
             raise serializers.ValidationError("end_time must be after start_time")
+        repeat = data.get('repeat', getattr(self.instance, 'repeat', 'none'))
+        days = data.get('repeat_days', getattr(self.instance, 'repeat_days', []))
+        if repeat == 'custom_days' and (not days or any(type(d) is not int or d not in range(7) for d in days)):
+            raise serializers.ValidationError({'repeat_days': 'Selecciona días válidos (0=domingo, 6=sábado).'})
+        until = data.get('repeat_until', getattr(self.instance, 'repeat_until', None))
+        if until and start and until < start.date():
+            raise serializers.ValidationError({'repeat_until': 'La fecha final no puede preceder al inicio.'})
+        if self.instance and self.instance.parent_show_id and any(k in data for k in ('repeat', 'repeat_days', 'repeat_until')):
+            raise serializers.ValidationError('Edita la regla de repetición en el show original.')
         return data
 
 
