@@ -1,5 +1,6 @@
 import React, { useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { runningOrder, clockTime, STATION_TIME_ZONE } from '../utils/runningOrder';
 import api, { getTracks, getFolders, getPlaylists } from '../api/client';
 
 export const DRAG_TYPE = 'application/x-radiostation';
@@ -31,6 +32,7 @@ export default function ContentEditor({ kind, value, onChanged }) {
   const rows = (x) => x?.data?.results || x?.data || [];
   const tracks = rows(tr), folders = rows(fl), playlists = rows(pl);
   const items = kind === 'shows' ? value.show_items || [] : value.playlist_tracks || [];
+  const timeline = runningOrder(items, value.start_time);
   const used = items.reduce((s, i) => s + (i.track.duration || 0), 0);
   const limit = kind === 'shows' ? value.duration_seconds : null;
   const owner = `${kind}/${value.id}`;
@@ -73,10 +75,11 @@ export default function ContentEditor({ kind, value, onChanged }) {
     <div className="radio-editor-summary">
       <strong>{items.length} pistas · {duration(used)}</strong>
       {limit != null && <span style={{ color: used > limit ? 'var(--red)' : 'var(--text-secondary)' }}>
-        {used > limit ? `${duration(used-limit)} de exceso (se corta al finalizar el show)` : `${duration(limit-used)} disponibles`}
+        {used > limit ? `${duration(used-limit)} de exceso: ajusta el horario para evitar cortes` : `${duration(limit-used)} disponibles`}
       </span>}
       {busy && <span role="status">Guardando…</span>}
     </div>
+    {items.some(i => !(Number(i.track.duration) > 0)) && <div className="radio-warning">Hay pistas sin duración válida. Revisa esos archivos antes de emitir; sus horarios no pueden calcularse.</div>}
     {kind === 'shows' && (value.repeat !== 'none' || value.parent_show) && <p className="radio-help">El contenido se comparte con la serie y sus próximas repeticiones.</p>}
     <div className="radio-editor-columns">
       <section className="radio-library">
@@ -110,20 +113,22 @@ export default function ContentEditor({ kind, value, onChanged }) {
         </div>
       </section>
       <section className="radio-running-order">
-        <h3>Orden de reproducción</h3>
-        <p className="radio-help">Arrastra para insertar o reordenar. Las flechas también permiten mover pistas.</p>
+        <h3>Contenido del show / Orden de reproducción</h3>
+        <p className="radio-help">Arrastra desde la biblioteca y suelta entre pistas. Cambios guardados automáticamente. Horarios previstos de la estación ({STATION_TIME_ZONE}); las filas rojas exceden el show.</p>
         <button className="btn btn-secondary btn-sm" disabled={busy || items.length < 2} onClick={() => {
           const ids = items.map(i => i.id);
           for (let i=ids.length-1; i>0; i--) { const j=Math.floor(Math.random()*(i+1)); [ids[i],ids[j]]=[ids[j],ids[i]]; }
           reorder(ids);
         }}>Mezclar orden</button>
+        <div className="radio-order-heading"><span>Inicio / Fin</span><span>Pista / Artista</span><span>Duración</span></div>
         <div className="radio-order-list" onDragOver={e => e.preventDefault()} onDrop={e => drop(e, items.length)}>
           {items.map((item, i) => <React.Fragment key={item.id}>{zone(i)}
-            <div className="radio-content-row" draggable={!busy} onDragStart={e => dragData(e, { kind:'item', owner, id:item.id })}
+            <div className={`radio-content-row ${limit != null && timeline[i].offset + timeline[i].duration > limit ? "radio-overflow" : ""}`} draggable={!busy} onDragStart={e => dragData(e, { kind:'item', owner, id:item.id })}
               onDragOver={e => { e.preventDefault(); e.stopPropagation(); setDropAt(i); }} onDrop={e => drop(e, i)}>
-              <span title="Arrastrar">⠿ {i+1}</span><button className="radio-icon" title="Preescuchar" onClick={() => setPreview(item.track)}>▶</button>
-              <div className="radio-track-info"><strong>{item.track.title}</strong><small>{item.track.artist || '—'} · desde {duration(items.slice(0,i).reduce((a,x)=>a+x.track.duration,0))}</small></div>
-              <span>{duration(item.track.duration)}</span>
+              <span title="Arrastrar">⠿ {i+1}</span>
+              <div className="radio-times"><strong>Inicio: {clockTime(timeline[i].start)}</strong><small>Fin: {clockTime(timeline[i].end)}</small></div><button className="radio-icon" title="Preescuchar" onClick={() => setPreview(item.track)}>▶</button>
+              <div className="radio-track-info"><strong>{item.track.title}</strong><small>{item.track.artist || '—'}</small></div>
+              <span className="radio-duration">{duration(item.track.duration)}</span>
               <div className="radio-row-buttons"><button className="radio-icon" title="Subir" disabled={busy || !i} onClick={() => move(i,i-1)}>↑</button>
               <button className="radio-icon" title="Bajar" disabled={busy || i===items.length-1} onClick={() => move(i,i+1)}>↓</button>
               <button className="radio-icon" title="Quitar del contenido" disabled={busy} onClick={() => mutate(kind==='shows'?'remove_item':'remove_track',{item_id:item.id})}>×</button></div>
